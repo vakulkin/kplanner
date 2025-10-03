@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import Optional
+from datetime import datetime
 import os
 import httpx
 from clerk_backend_api import Clerk
@@ -9,16 +10,19 @@ from clerk_backend_api.security.types import AuthenticateRequestOptions
 import models
 from database import engine, get_db
 from schemas import (
-    Company, AdCampaign, AdGroup, Keyword, Filter,
+    Company, AdCampaign, AdGroup, Keyword,
+    CompanyCreate, AdCampaignCreate, AdGroupCreate, KeywordCreate,
     BulkKeywordCreate, BulkKeywordUpdateRelations, BulkKeywordCreateRelations,
-    BulkFilterCreate, BulkFilterUpdateRelations, BulkFilterCreateRelations,
-    BulkDeleteRequest, MatchTypes,
-    SingleObjectResponse, MultipleObjectsResponse, BulkOperationResponse
+    BulkDeleteRequest,
+    SingleObjectResponse, MultipleObjectsResponse,
+    BulkDeleteResponse, BulkKeywordCreateResponse, 
+    BulkRelationUpdateResponse, BulkRelationCreateResponse,
 )
 import math
 
-# Create tables
-models.Base.metadata.create_all(bind=engine)
+# Create tables (skip if in testing mode)
+if not os.getenv("TESTING"):
+    models.Base.metadata.create_all(bind=engine)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -37,9 +41,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Check for dev mode
 DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
 DEMO_USER_ID = "clerk_demo_user"
+
+# Active entity limits
+COMPANY_ACTIVE_LIMIT = 3
+AD_CAMPAIGN_ACTIVE_LIMIT = 5
+AD_GROUP_ACTIVE_LIMIT = 7
+
+# Pagination and batch processing constants
+DEFAULT_PAGE = 1
+PAGE_SIZE = 50  # Default page size
+MAX_PAGE_SIZE = 100  # Maximum page size
+BATCH_SIZE = 25
+MAX_KEYWORDS_PER_REQUEST = 100
 
 # Initialize Clerk SDK (only if not in dev mode)
 clerk_sdk = None
@@ -52,12 +69,6 @@ if not DEV_MODE:
 
 # Dependency to get authenticated user ID from Clerk
 async def get_current_user_id(request: Request) -> str:
-    """
-    Authenticate request using Clerk and extract user ID from token.
-    In DEV_MODE, always returns 'clerk_demo_user' without requiring authentication.
-    Raises HTTPException if authentication fails (production mode).
-    """
-    # In dev mode, skip authentication and use demo user
     if DEV_MODE:
         return DEMO_USER_ID
     
@@ -97,21 +108,10 @@ async def get_current_user_id(request: Request) -> str:
 
 
 # Helper function for pagination
-def paginate_query(query, page: int = 1, page_size: int = 100):
-    """
-    Apply pagination to a SQLAlchemy query.
-    
-    Args:
-        query: SQLAlchemy query object
-        page: Page number (1-indexed)
-        page_size: Number of items per page (max 100)
-    
-    Returns:
-        Tuple of (paginated_items, total_count, total_pages)
-    """
+def paginate_query(query, page: int = DEFAULT_PAGE, page_size: int = PAGE_SIZE):
     # Validate and limit page_size
-    page_size = min(max(1, page_size), 100)  # Between 1 and 100
-    page = max(1, page)  # At least page 1
+    page_size = min(max(1, page_size), MAX_PAGE_SIZE)  # Between 1 and MAX_PAGE_SIZE
+    page = max(DEFAULT_PAGE, page)  # At least DEFAULT_PAGE
     
     # Get total count
     total_count = query.count()
@@ -126,22 +126,627 @@ def paginate_query(query, page: int = 1, page_size: int = 100):
     return items, total_count, total_pages
 
 
+# Helper function to apply common date filters
+def _apply_date_filters(query, model_class, created_after, created_before, updated_after, updated_before):
+    """Apply common date filters to a query."""
+    if created_after:
+        query = query.filter(model_class.created >= created_after)
+    if created_before:
+        query = query.filter(model_class.created <= created_before)
+    if updated_after:
+        query = query.filter(model_class.updated >= updated_after)
+    if updated_before:
+        query = query.filter(model_class.updated <= updated_before)
+    return query
+
+
+# Helper function to apply sorting
+def _apply_sorting(query, model_class, sort_by, sort_order, sort_fields_map, default_field="created"):
+    """Apply sorting to a query based on field mapping."""
+    sort_field = sort_by.lower() if sort_by else default_field
+    sort_direction = sort_order.lower() if sort_order else "desc"
+    
+    if sort_field in sort_fields_map:
+        order_column = sort_fields_map[sort_field]
+        if sort_direction == "asc":
+            query = query.order_by(order_column.asc())
+        else:
+            query = query.order_by(order_column.desc())
+    else:
+        # Default sorting
+        default_column = sort_fields_map.get(default_field, model_class.created)
+        query = query.order_by(default_column.desc())
+    
+    return query
+
+
+# Helper function to generate common metadata structure
+def _generate_metadata(entity_type, parent_field=None, additional_sort_fields=None):
+    """Generate common filter and sorting metadata for entity endpoints."""
+    filters = {}
+    
+    # Add parent filter if applicable
+    if parent_field:
+        filters[parent_field] = {
+            "type": "integer",
+            "description": f"Filter by parent {parent_field.replace('_', ' ')}"
+        }
+    
+    # Add search filter
+    filters["search"] = {
+        "type": "string",
+        "description": f"Search by {entity_type} title (case-insensitive, partial match)"
+    }
+    
+    # Add is_active filter
+    filters["is_active"] = {
+        "type": "boolean",
+        "description": "Filter by is_active status",
+        "available_values": [True, False]
+    }
+    
+    # Add common date filters
+    date_filters = {
+        "created_after": {
+            "type": "datetime",
+            "description": "Filter by created date (after)",
+            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
+        },
+        "created_before": {
+            "type": "datetime",
+            "description": "Filter by created date (before)",
+            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
+        },
+        "updated_after": {
+            "type": "datetime",
+            "description": "Filter by updated date (after)",
+            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
+        },
+        "updated_before": {
+            "type": "datetime",
+            "description": "Filter by updated date (before)",
+            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
+        }
+    }
+    filters.update(date_filters)
+    
+    # Generate sorting metadata
+    sort_values = ["id", "title", "is_active", "created", "updated"]
+    if parent_field:
+        sort_values.insert(-2, parent_field)  # Insert before 'created'
+    if additional_sort_fields:
+        sort_values.extend(additional_sort_fields)
+    
+    sorting = {
+        "sort_by": {
+            "type": "string",
+            "description": "Field to sort by",
+            "available_values": sort_values,
+            "default": "created"
+        },
+        "sort_order": {
+            "type": "string",
+            "description": "Sort direction",
+            "available_values": ["asc", "desc"],
+            "default": "desc"
+        }
+    }
+    
+    return filters, sorting
+
+
+# Helper function to get sort fields map for standard entities
+def _get_entity_sort_fields(model_class, parent_field: str = None):
+    """Generate sort fields map for entities with optional parent field."""
+    fields = {
+        "id": model_class.id,
+        "title": model_class.title,
+        "is_active": model_class.is_active,
+        "created": model_class.created,
+        "updated": model_class.updated
+    }
+    
+    if parent_field:
+        fields[parent_field] = getattr(model_class, parent_field)
+    
+    return fields
+
+
+# Helper functions for generating API metadata
+def _get_companies_metadata():
+    """Get metadata for companies endpoint including available filters and sorting."""
+    return _generate_metadata("company")
+
+
+def _get_ad_campaigns_metadata():
+    """Get metadata for ad campaigns endpoint including available filters and sorting."""
+    return _generate_metadata("campaign", parent_field="company_id")
+
+
+def _get_ad_groups_metadata():
+    """Get metadata for ad groups endpoint including available filters and sorting."""
+    return _generate_metadata("ad group", parent_field="ad_campaign_id")
+
+
+def _get_keywords_metadata():
+    """Get metadata for keywords endpoint including available filters and sorting."""
+    filters = {
+        "only_attached": {
+            "type": "boolean",
+            "description": "Show only keywords attached to at least one entity",
+            "available_values": [True, False],
+            "default": False
+        },
+        "search": {
+            "type": "string",
+            "description": "Search by keyword text (case-insensitive, partial match)"
+        },
+        "created_after": {
+            "type": "datetime",
+            "description": "Filter by created date (after)",
+            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
+        },
+        "created_before": {
+            "type": "datetime",
+            "description": "Filter by created date (before)",
+            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
+        },
+        "updated_after": {
+            "type": "datetime",
+            "description": "Filter by updated date (after)",
+            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
+        },
+        "updated_before": {
+            "type": "datetime",
+            "description": "Filter by updated date (before)",
+            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
+        },
+        "has_broad": {
+            "type": "boolean",
+            "description": "Filter keywords with at least one broad match relation",
+            "available_values": [True, False]
+        },
+        "has_phrase": {
+            "type": "boolean",
+            "description": "Filter keywords with at least one phrase match relation",
+            "available_values": [True, False]
+        },
+        "has_exact": {
+            "type": "boolean",
+            "description": "Filter keywords with at least one exact match relation",
+            "available_values": [True, False]
+        },
+        "has_neg_broad": {
+            "type": "boolean",
+            "description": "Filter keywords with at least one negative broad match relation",
+            "available_values": [True, False]
+        },
+        "has_neg_phrase": {
+            "type": "boolean",
+            "description": "Filter keywords with at least one negative phrase match relation",
+            "available_values": [True, False]
+        },
+        "has_neg_exact": {
+            "type": "boolean",
+            "description": "Filter keywords with at least one negative exact match relation",
+            "available_values": [True, False]
+        }
+    }
+    
+    sorting = {
+        "sort_by": {
+            "type": "string",
+            "description": "Primary sort field",
+            "available_values": ["id", "keyword", "created", "updated", "has_broad", "has_phrase", "has_exact", "has_neg_broad", "has_neg_phrase", "has_neg_exact"],
+            "default": "created"
+        },
+        "sort_order": {
+            "type": "string",
+            "description": "Primary sort direction",
+            "available_values": ["asc", "desc"],
+            "default": "desc"
+        },
+        "sort_by_2": {
+            "type": "string",
+            "description": "Secondary sort field (optional)",
+            "available_values": ["id", "keyword", "created", "updated", "has_broad", "has_phrase", "has_exact", "has_neg_broad", "has_neg_phrase", "has_neg_exact"]
+        },
+        "sort_order_2": {
+            "type": "string",
+            "description": "Secondary sort direction",
+            "available_values": ["asc", "desc"]
+        },
+        "sort_by_3": {
+            "type": "string",
+            "description": "Tertiary sort field (optional)",
+            "available_values": ["id", "keyword", "created", "updated", "has_broad", "has_phrase", "has_exact", "has_neg_broad", "has_neg_phrase", "has_neg_exact"]
+        },
+        "sort_order_3": {
+            "type": "string",
+            "description": "Tertiary sort direction",
+            "available_values": ["asc", "desc"]
+        }
+    }
+    
+    special_features = {
+        "multi_level_sorting": {
+            "description": "Supports up to 3 levels of sorting (primary, secondary, tertiary)",
+            "max_levels": 3
+        },
+        "match_type_sorting": {
+            "description": "Can sort by match type presence (has_broad, has_phrase, etc.)",
+            "note": "When sorting desc, keywords WITH the match type appear first (value 1). When sorting asc, keywords WITHOUT the match type appear first (value 0)."
+        }
+    }
+    
+    return filters, sorting, special_features
+
+
 # Helper function for batch processing
-def process_in_batches(items: list, batch_size: int = 25):
-    """
-    Split a list into batches for processing.
-    
-    Args:
-        items: List of items to process
-        batch_size: Maximum size of each batch (default 25, max 100)
-    
-    Yields:
-        Batches of items
-    """
-    batch_size = min(max(1, batch_size), 100)  # Between 1 and 100
+def process_in_batches(items: list, batch_size: int = BATCH_SIZE):
+    batch_size = max(1, batch_size)  # Ensure at least 1
     
     for i in range(0, len(items), batch_size):
         yield items[i:i + batch_size]
+
+
+def _bulk_delete_with_batches(
+    db: Session,
+    user_id: str,
+    ids: list[int],
+    model_class,
+    ownership_field: str,
+    message_template: str,
+    batch_size: int = BATCH_SIZE
+) -> BulkDeleteResponse:
+    """Generic helper for bulk delete operations with batching and ownership validation."""
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids is required")
+    
+    deleted_count = 0
+    batches_processed = 0
+    
+    # Process deletions in batches
+    for id_batch in process_in_batches(ids, batch_size=batch_size):
+        # Filter by ownership directly - works for all entities and relations!
+        batch_deleted = db.query(model_class).filter(
+            getattr(model_class, 'id').in_(id_batch),
+            getattr(model_class, ownership_field) == user_id
+        ).delete(synchronize_session=False)
+        
+        deleted_count += batch_deleted
+        db.commit()
+        batches_processed += 1
+    
+    return BulkDeleteResponse(
+        message=message_template.format(deleted_count),
+        deleted=deleted_count,
+        processed=deleted_count,
+        requested=len(ids),
+        batches_processed=batches_processed,
+        batch_size=batch_size
+    )
+
+
+def _check_active_limit(
+    db: Session,
+    user_id: str,
+    model_class,
+    limit: int,
+    entity_name: str,
+    exclude_id: int = None
+) -> tuple[bool, str]:
+    """Check if activating an entity would exceed the limit.
+    
+    Returns (can_activate, message)
+    """
+    query = db.query(model_class).filter(
+        getattr(model_class, 'clerk_user_id') == user_id,
+        model_class.is_active == True
+    )
+    
+    # Exclude current entity when checking (for toggle/update operations)
+    if exclude_id:
+        query = query.filter(model_class.id != exclude_id)
+    
+    active_count = query.count()
+    
+    if active_count >= limit:
+        return False, f"Maximum {limit} active {entity_name}s allowed. Please deactivate another {entity_name} first."
+    
+    return True, ""
+
+
+def _toggle_entity_active(
+    db: Session,
+    entity_id: int,
+    user_id: str,
+    model_class,
+    schema_class,
+    entity_name: str,
+    active_limit: int = None
+) -> SingleObjectResponse:
+    """Generic helper for toggling is_active status of entities."""
+    entity = db.query(model_class).filter(
+        model_class.id == entity_id,
+        getattr(model_class, 'clerk_user_id') == user_id
+    ).first()
+    if not entity:
+        raise HTTPException(status_code=404, detail=f"{entity_name.capitalize()} not found")
+    
+    # If trying to activate, check limit
+    if not entity.is_active and active_limit:
+        can_activate, limit_message = _check_active_limit(
+            db, user_id, model_class, active_limit, entity_name, exclude_id=entity_id
+        )
+        if not can_activate:
+            return SingleObjectResponse(
+                message=limit_message,
+                object=schema_class.model_validate(entity)
+            )
+    
+    entity.is_active = not entity.is_active
+    db.commit()
+    db.refresh(entity)
+    
+    return SingleObjectResponse(
+        message=f"{entity_name.capitalize()} {'activated' if entity.is_active else 'deactivated'} successfully",
+        object=schema_class.model_validate(entity)
+    )
+
+
+def _validate_parent_entity(db: Session, user_id: str, parent_id: int, parent_model, parent_name: str):
+    """Validate that a parent entity exists and belongs to the user."""
+    parent = db.query(parent_model).filter(
+        parent_model.id == parent_id,
+        getattr(parent_model, 'clerk_user_id') == user_id
+    ).first()
+    if not parent:
+        raise HTTPException(status_code=404, detail=f"{parent_name.capitalize()} not found")
+    return parent
+
+
+def _get_entity_by_id(
+    db: Session,
+    user_id: str,
+    entity_id: int,
+    model_class,
+    schema_class,
+    entity_name: str
+) -> SingleObjectResponse:
+    """Generic helper for retrieving a single entity by ID."""
+    entity = db.query(model_class).filter(
+        model_class.id == entity_id,
+        getattr(model_class, 'clerk_user_id') == user_id
+    ).first()
+    if not entity:
+        raise HTTPException(status_code=404, detail=f"{entity_name.capitalize()} not found")
+    return SingleObjectResponse(
+        message=f"{entity_name.capitalize()} retrieved successfully",
+        object=schema_class.model_validate(entity)
+    )
+
+
+def _update_simple_entity(
+    db: Session,
+    user_id: str,
+    entity_id: int,
+    entity_update,
+    model_class,
+    schema_class,
+    entity_name: str,
+    update_fields: dict
+) -> SingleObjectResponse:
+    """Generic helper for updating entities without active limits or parent validation."""
+    entity = db.query(model_class).filter(
+        model_class.id == entity_id,
+        getattr(model_class, 'clerk_user_id') == user_id
+    ).first()
+    if not entity:
+        raise HTTPException(status_code=404, detail=f"{entity_name.capitalize()} not found")
+    
+    # Update fields dynamically
+    for field_name, field_value in update_fields.items():
+        setattr(entity, field_name, field_value)
+    
+    db.commit()
+    db.refresh(entity)
+    
+    return SingleObjectResponse(
+        message=f"{entity_name.capitalize()} updated successfully",
+        object=schema_class.model_validate(entity)
+    )
+
+
+def _list_entities_with_filters(
+    db: Session,
+    user_id: str,
+    model_class,
+    schema_class,
+    entity_name: str,
+    entity_name_plural: str,
+    page: int,
+    page_size: int,
+    search: Optional[str],
+    is_active: Optional[bool],
+    created_after: Optional[datetime],
+    created_before: Optional[datetime],
+    updated_after: Optional[datetime],
+    updated_before: Optional[datetime],
+    sort_by: str,
+    sort_order: str,
+    sort_fields_map: dict,
+    metadata_func,
+    parent_filter: Optional[tuple] = None
+) -> MultipleObjectsResponse:
+    """Generic helper for listing entities with filtering, sorting, and pagination.
+    
+    Args:
+        parent_filter: Optional tuple of (field_name, field_value) for parent filtering
+        entity_name_plural: Plural form of entity name for messages
+    """
+    # Build base query with user filter
+    if parent_filter:
+        field_name, field_value = parent_filter
+        if field_value is not None:
+            query = db.query(model_class).filter(
+                getattr(model_class, 'clerk_user_id') == user_id,
+                getattr(model_class, field_name) == field_value
+            )
+        else:
+            query = db.query(model_class).filter(getattr(model_class, 'clerk_user_id') == user_id)
+    else:
+        query = db.query(model_class).filter(getattr(model_class, 'clerk_user_id') == user_id)
+    
+    # Add search filter if provided
+    if search:
+        query = query.filter(model_class.title.ilike(f"%{search}%"))
+    
+    # Add is_active filter
+    if is_active is not None:
+        query = query.filter(model_class.is_active == is_active)
+    
+    # Apply date filters
+    query = _apply_date_filters(query, model_class, created_after, created_before, updated_after, updated_before)
+    
+    # Apply sorting
+    query = _apply_sorting(query, model_class, sort_by, sort_order, sort_fields_map)
+    
+    # Paginate
+    entities, total_count, total_pages = paginate_query(query, page, page_size)
+    
+    # Get metadata
+    filters, sorting = metadata_func()
+    
+    # Build response
+    return MultipleObjectsResponse(
+        message=f"Retrieved {total_count} {entity_name_plural}",
+        objects=[schema_class.model_validate(e) for e in entities],
+        pagination={
+            "total": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages
+        },
+        filters=filters,
+        sorting=sorting
+    )
+
+
+def _create_entity_with_limit(
+    db: Session,
+    user_id: str,
+    entity_data,
+    model_class,
+    schema_class,
+    entity_name: str,
+    active_limit: int = None,
+    parent_field: str = None,
+    parent_model = None,
+    parent_name: str = None,
+    **extra_fields
+) -> SingleObjectResponse:
+    """Generic helper for creating entities with active limit checking and optional parent validation."""
+    # Validate parent if required
+    if parent_field and parent_model:
+        parent_id = getattr(entity_data, parent_field)
+        _validate_parent_entity(db, user_id, parent_id, parent_model, parent_name)
+    
+    # Check if trying to create as active and limit is reached
+    is_active = entity_data.is_active
+    limit_message = None
+    
+    if is_active and active_limit:
+        can_activate, limit_msg = _check_active_limit(
+            db, user_id, model_class, active_limit, entity_name
+        )
+        if not can_activate:
+            is_active = False
+            limit_message = limit_msg
+    
+    # Build entity data
+    entity_dict = {
+        'title': entity_data.title,
+        'is_active': is_active,
+        'clerk_user_id': user_id,
+        **extra_fields
+    }
+    
+    # Add parent field if provided
+    if parent_field:
+        entity_dict[parent_field] = getattr(entity_data, parent_field)
+    
+    db_entity = model_class(**entity_dict)
+    db.add(db_entity)
+    db.commit()
+    db.refresh(db_entity)
+    
+    message = f"{entity_name.capitalize()} created successfully"
+    if limit_message:
+        message = f"{entity_name.capitalize()} created as inactive. {limit_message}"
+    
+    return SingleObjectResponse(
+        message=message,
+        object=schema_class.model_validate(db_entity)
+    )
+
+
+def _update_entity_with_limit(
+    db: Session,
+    user_id: str,
+    entity_id: int,
+    entity_update,
+    model_class,
+    schema_class,
+    entity_name: str,
+    active_limit: int = None,
+    parent_field: str = None,
+    parent_model = None,
+    parent_name: str = None
+) -> SingleObjectResponse:
+    """Generic helper for updating entities with active limit checking and optional parent validation."""
+    # Get existing entity
+    entity = db.query(model_class).filter(
+        model_class.id == entity_id,
+        getattr(model_class, 'clerk_user_id') == user_id
+    ).first()
+    if not entity:
+        raise HTTPException(status_code=404, detail=f"{entity_name.capitalize()} not found")
+    
+    # Validate parent if required
+    if parent_field and parent_model:
+        parent_id = getattr(entity_update, parent_field)
+        _validate_parent_entity(db, user_id, parent_id, parent_model, parent_name)
+    
+    # Check if trying to activate and limit is reached
+    is_active = entity_update.is_active
+    limit_message = None
+    
+    if is_active and not entity.is_active and active_limit:  # Trying to activate
+        can_activate, limit_msg = _check_active_limit(
+            db, user_id, model_class, active_limit, entity_name, exclude_id=entity_id
+        )
+        if not can_activate:
+            is_active = False
+            limit_message = limit_msg
+    
+    # Update entity
+    entity.title = entity_update.title
+    entity.is_active = is_active
+    if parent_field:
+        setattr(entity, parent_field, getattr(entity_update, parent_field))
+    
+    db.commit()
+    db.refresh(entity)
+    
+    message = f"{entity_name.capitalize()} updated successfully"
+    if limit_message:
+        message = f"{entity_name.capitalize()} updated but kept inactive. {limit_message}"
+    
+    return SingleObjectResponse(
+        message=message,
+        object=schema_class.model_validate(entity)
+    )
 
 
 @app.get("/")
@@ -152,45 +757,194 @@ async def root():
         "demo_user": DEMO_USER_ID if DEV_MODE else None
     }
 
+# Entity configuration for CRUD operations
+ENTITY_CONFIGS = {
+    "company": {
+        "model_class": models.Company,
+        "schema_class": Company,
+        "create_schema": CompanyCreate,
+        "entity_name": "company",
+        "entity_name_plural": "companies",
+        "active_limit": COMPANY_ACTIVE_LIMIT,
+        "id_param": "company_id",
+        "parent_field": None,
+        "parent_model": None,
+        "parent_name": None,
+    },
+    "campaign": {
+        "model_class": models.AdCampaign,
+        "schema_class": AdCampaign,
+        "create_schema": AdCampaignCreate,
+        "entity_name": "campaign",
+        "entity_name_plural": "campaigns",
+        "active_limit": AD_CAMPAIGN_ACTIVE_LIMIT,
+        "id_param": "campaign_id",
+        "parent_field": "company_id",
+        "parent_model": models.Company,
+        "parent_name": "company",
+    },
+    "ad_group": {
+        "model_class": models.AdGroup,
+        "schema_class": AdGroup,
+        "create_schema": AdGroupCreate,
+        "entity_name": "ad group",
+        "entity_name_plural": "ad groups",
+        "active_limit": AD_GROUP_ACTIVE_LIMIT,
+        "id_param": "ad_group_id",
+        "parent_field": "ad_campaign_id",
+        "parent_model": models.AdCampaign,
+        "parent_name": "ad campaign",
+    },
+}
+
+
+# Generic endpoint handler functions
+def _handle_create_entity(entity_data, db: Session, user_id: str, config: dict):
+    """Generic handler for entity creation."""
+    return _create_entity_with_limit(
+        db=db,
+        user_id=user_id,
+        entity_data=entity_data,
+        model_class=config["model_class"],
+        schema_class=config["schema_class"],
+        entity_name=config["entity_name"],
+        active_limit=config["active_limit"],
+        parent_field=config["parent_field"],
+        parent_model=config["parent_model"],
+        parent_name=config["parent_name"]
+    )
+
+
+def _handle_list_entities(
+    db: Session,
+    user_id: str,
+    config: dict,
+    page: int,
+    page_size: int,
+    search: Optional[str],
+    is_active: Optional[bool],
+    created_after: Optional[datetime],
+    created_before: Optional[datetime],
+    updated_after: Optional[datetime],
+    updated_before: Optional[datetime],
+    sort_by: str,
+    sort_order: str,
+    metadata_func,
+    parent_id: Optional[int] = None
+):
+    """Generic handler for entity listing."""
+    parent_filter = None
+    if config["parent_field"] and parent_id is not None:
+        parent_filter = (config["parent_field"], parent_id)
+    
+    return _list_entities_with_filters(
+        db=db,
+        user_id=user_id,
+        model_class=config["model_class"],
+        schema_class=config["schema_class"],
+        entity_name=config["entity_name"],
+        entity_name_plural=config["entity_name_plural"],
+        page=page,
+        page_size=page_size,
+        search=search,
+        is_active=is_active,
+        created_after=created_after,
+        created_before=created_before,
+        updated_after=updated_after,
+        updated_before=updated_before,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        sort_fields_map=_get_entity_sort_fields(config["model_class"], config["parent_field"]),
+        metadata_func=metadata_func,
+        parent_filter=parent_filter
+    )
+
+
+def _handle_get_entity(entity_id: int, db: Session, user_id: str, config: dict):
+    """Generic handler for getting a single entity."""
+    return _get_entity_by_id(
+        db=db,
+        user_id=user_id,
+        entity_id=entity_id,
+        model_class=config["model_class"],
+        schema_class=config["schema_class"],
+        entity_name=config["entity_name"]
+    )
+
+
+def _handle_update_entity(entity_id: int, entity_update, db: Session, user_id: str, config: dict):
+    """Generic handler for entity updates."""
+    return _update_entity_with_limit(
+        db=db,
+        user_id=user_id,
+        entity_id=entity_id,
+        entity_update=entity_update,
+        model_class=config["model_class"],
+        schema_class=config["schema_class"],
+        entity_name=config["entity_name"],
+        active_limit=config["active_limit"],
+        parent_field=config["parent_field"],
+        parent_model=config["parent_model"],
+        parent_name=config["parent_name"]
+    )
+
+
+def _handle_toggle_entity(entity_id: int, db: Session, user_id: str, config: dict):
+    """Generic handler for toggling entity active status."""
+    return _toggle_entity_active(
+        db=db,
+        entity_id=entity_id,
+        user_id=user_id,
+        model_class=config["model_class"],
+        schema_class=config["schema_class"],
+        entity_name=config["entity_name"],
+        active_limit=config["active_limit"]
+    )
+
+
+def _handle_bulk_delete(delete_data: BulkDeleteRequest, db: Session, user_id: str, config: dict, batch_size: int):
+    """Generic handler for bulk delete operations."""
+    return _bulk_delete_with_batches(
+        db=db,
+        user_id=user_id,
+        ids=delete_data.ids,
+        model_class=config["model_class"],
+        ownership_field="clerk_user_id",
+        message_template=f"Deleted {{0}} {config['entity_name_plural']}",
+        batch_size=batch_size
+    )
+
+
 # Company endpoints
 @app.post("/companies", response_model=SingleObjectResponse, status_code=201)
 async def create_company(
-    company: Company,
+    company: CompanyCreate,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Create a new company"""
-    db_company = models.Company(
-        title=company.title,
-        clerk_user_id=user_id
-    )
-    db.add(db_company)
-    db.commit()
-    db.refresh(db_company)
-    return SingleObjectResponse(
-        status="success",
-        message="Company created successfully",
-        object=Company.model_validate(db_company)
-    )
+    return _handle_create_entity(company, db, user_id, ENTITY_CONFIGS["company"])
 
 @app.get("/companies", response_model=MultipleObjectsResponse)
 async def list_companies(
-    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
-    page_size: int = Query(100, ge=1, le=100, description="Items per page (max 100)"),
+    page: int = Query(DEFAULT_PAGE, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description=f"Items per page (max {MAX_PAGE_SIZE})"),
+    search: Optional[str] = Query(None, description="Search by company title (case-insensitive, partial match)"),
+    is_active: Optional[bool] = Query(None, description="Filter by is_active status"),
+    created_after: Optional[datetime] = Query(None, description="Filter by created date (after)"),
+    created_before: Optional[datetime] = Query(None, description="Filter by created date (before)"),
+    updated_after: Optional[datetime] = Query(None, description="Filter by updated date (after)"),
+    updated_before: Optional[datetime] = Query(None, description="Filter by updated date (before)"),
+    sort_by: Optional[str] = Query("created", description="Sort by field: id, title, is_active, created, updated"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """List all companies for the authenticated user with pagination"""
-    query = db.query(models.Company).filter(models.Company.clerk_user_id == user_id)
-    companies, total_count, total_pages = paginate_query(query, page, page_size)
-    
-    return MultipleObjectsResponse(
-        status="success",
-        objects=[Company.model_validate(c) for c in companies],
-        total=total_count,
-        page=page,
-        page_size=page_size,
-        total_pages=total_pages
+    """List all companies for the authenticated user with pagination, filters, and sorting"""
+    return _handle_list_entities(
+        db, user_id, ENTITY_CONFIGS["company"], page, page_size, search, is_active,
+        created_after, created_before, updated_after, updated_before,
+        sort_by, sort_order, _get_companies_metadata
     )
 
 @app.get("/companies/{company_id}", response_model=SingleObjectResponse)
@@ -200,128 +954,68 @@ async def get_company(
     user_id: str = Depends(get_current_user_id)
 ):
     """Get a specific company by ID"""
-    company = db.query(models.Company).filter(
-        models.Company.id == company_id,
-        models.Company.clerk_user_id == user_id
-    ).first()
-    if not company:
-        raise HTTPException(status_code=404, detail="Company not found")
-    return SingleObjectResponse(
-        status="success",
-        object=Company.model_validate(company),
-        id=company.id
-    )
+    return _handle_get_entity(company_id, db, user_id, ENTITY_CONFIGS["company"])
 
-
-@app.post("/companies/{company_id}/update", response_model=BulkOperationResponse)
+@app.post("/companies/{company_id}/update", response_model=SingleObjectResponse)
 async def update_company(
     company_id: int,
-    company_update: Company,
+    company_update: CompanyCreate,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Update a company"""
-    company = db.query(models.Company).filter(
-        models.Company.id == company_id,
-        models.Company.clerk_user_id == user_id
-    ).first()
-    if not company:
-        raise HTTPException(status_code=404, detail="Company not found")
-    
-    company.title = company_update.title
-    db.commit()
-    db.refresh(company)
-    return BulkOperationResponse(
-        status="success",
-        message="Company updated successfully",
-        object={
-            "id": company.id,
-            "title": company.title,
-            "clerk_user_id": company.clerk_user_id,
-            "created": company.created.isoformat(),
-            "updated": company.updated.isoformat()
-        },
-        id=company.id
-    )
+    return _handle_update_entity(company_id, company_update, db, user_id, ENTITY_CONFIGS["company"])
 
-
-@app.post("/companies/bulk/delete", response_model=BulkOperationResponse)
+@app.post("/companies/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_companies(
     delete_data: BulkDeleteRequest,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Bulk delete companies"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.Company).filter(
-        models.Company.id.in_(delete_data.ids),
-        models.Company.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} companies",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
-    )
+    return _handle_bulk_delete(delete_data, db, user_id, ENTITY_CONFIGS["company"], batch_size)
+
+@app.post("/companies/{company_id}/toggle", response_model=SingleObjectResponse)
+async def toggle_company_active(
+    company_id: int,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    """Toggle is_active status for a company"""
+    return _handle_toggle_entity(company_id, db, user_id, ENTITY_CONFIGS["company"])
 
 # Ad Campaign endpoints
 @app.post("/ad_campaigns", response_model=SingleObjectResponse, status_code=201)
 async def create_ad_campaign(
-    campaign: AdCampaign,
+    campaign: AdCampaignCreate,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Create a new ad campaign"""
-    # Validate company_id if provided
-    if campaign.company_id:
-        company = db.query(models.Company).filter(
-            models.Company.id == campaign.company_id,
-            models.Company.clerk_user_id == user_id
-        ).first()
-        if not company:
-            raise HTTPException(status_code=404, detail="Company not found")
-    
-    db_campaign = models.AdCampaign(
-        title=campaign.title,
-        clerk_user_id=user_id,
-        company_id=campaign.company_id
-    )
-    db.add(db_campaign)
-    db.commit()
-    db.refresh(db_campaign)
-    return SingleObjectResponse(
-        status="success",
-        message="Campaign created successfully",
-        object=AdCampaign.model_validate(db_campaign)
-    )
+    return _handle_create_entity(campaign, db, user_id, ENTITY_CONFIGS["campaign"])
 
 @app.get("/ad_campaigns", response_model=MultipleObjectsResponse)
 async def list_ad_campaigns(
     company_id: Optional[int] = None,
-    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
-    page_size: int = Query(100, ge=1, le=100, description="Items per page (max 100)"),
+    page: int = Query(DEFAULT_PAGE, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description=f"Items per page (max {MAX_PAGE_SIZE})"),
+    search: Optional[str] = Query(None, description="Search by campaign title (case-insensitive, partial match)"),
+    is_active: Optional[bool] = Query(None, description="Filter by is_active status"),
+    created_after: Optional[datetime] = Query(None, description="Filter by created date (after)"),
+    created_before: Optional[datetime] = Query(None, description="Filter by created date (before)"),
+    updated_after: Optional[datetime] = Query(None, description="Filter by updated date (after)"),
+    updated_before: Optional[datetime] = Query(None, description="Filter by updated date (before)"),
+    sort_by: Optional[str] = Query("created", description="Sort by field: id, title, is_active, company_id, created, updated"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """List all ad campaigns for the authenticated user with pagination"""
-    filters = [models.AdCampaign.clerk_user_id == user_id]
-    if company_id is not None:
-        filters.append(models.AdCampaign.company_id == company_id)
-    query = db.query(models.AdCampaign).filter(*filters)
-    campaigns, total_count, total_pages = paginate_query(query, page, page_size)
-    
-    return MultipleObjectsResponse(
-        status="success",
-        objects=[AdCampaign.model_validate(c) for c in campaigns],
-        total=total_count,
-        page=page,
-        page_size=page_size,
-        total_pages=total_pages
+    """List all ad campaigns for the authenticated user with pagination, filters, and sorting"""
+    return _handle_list_entities(
+        db, user_id, ENTITY_CONFIGS["campaign"], page, page_size, search, is_active,
+        created_after, created_before, updated_after, updated_before,
+        sort_by, sort_order, _get_ad_campaigns_metadata, company_id
     )
 
 @app.get("/ad_campaigns/{campaign_id}", response_model=SingleObjectResponse)
@@ -331,139 +1025,68 @@ async def get_ad_campaign(
     user_id: str = Depends(get_current_user_id)
 ):
     """Get a specific ad campaign by ID"""
-    campaign = db.query(models.AdCampaign).filter(
-        models.AdCampaign.id == campaign_id,
-        models.AdCampaign.clerk_user_id == user_id
-    ).first()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Ad campaign not found")
-    return SingleObjectResponse(
-        status="success",
-        object=AdCampaign.model_validate(campaign),
-        id=campaign.id
-    )
+    return _handle_get_entity(campaign_id, db, user_id, ENTITY_CONFIGS["campaign"])
 
-
-@app.post("/ad_campaigns/{campaign_id}/update", response_model=BulkOperationResponse)
+@app.post("/ad_campaigns/{campaign_id}/update", response_model=SingleObjectResponse)
 async def update_ad_campaign(
     campaign_id: int,
-    campaign_update: AdCampaign,
+    campaign_update: AdCampaignCreate,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Update an ad campaign"""
-    campaign = db.query(models.AdCampaign).filter(
-        models.AdCampaign.id == campaign_id,
-        models.AdCampaign.clerk_user_id == user_id
-    ).first()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Ad campaign not found")
-    
-    # Validate company_id if provided
-    if campaign_update.company_id:
-        company = db.query(models.Company).filter(
-            models.Company.id == campaign_update.company_id,
-            models.Company.clerk_user_id == user_id
-        ).first()
-        if not company:
-            raise HTTPException(status_code=404, detail="Company not found")
-    
-    campaign.title = campaign_update.title
-    campaign.company_id = campaign_update.company_id
-    db.commit()
-    db.refresh(campaign)
-    return BulkOperationResponse(
-        status="success",
-        message="Campaign updated successfully",
-        object={
-            "id": campaign.id,
-            "title": campaign.title,
-            "clerk_user_id": campaign.clerk_user_id,
-            "company_id": campaign.company_id,
-            "created": campaign.created.isoformat(),
-            "updated": campaign.updated.isoformat()
-        },
-        id=campaign.id
-    )
+    return _handle_update_entity(campaign_id, campaign_update, db, user_id, ENTITY_CONFIGS["campaign"])
 
-
-@app.post("/ad_campaigns/bulk/delete", response_model=BulkOperationResponse)
+@app.post("/ad_campaigns/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_ad_campaigns(
     delete_data: BulkDeleteRequest,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Bulk delete ad campaigns"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.AdCampaign).filter(
-        models.AdCampaign.id.in_(delete_data.ids),
-        models.AdCampaign.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} campaigns",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
-    )
+    return _handle_bulk_delete(delete_data, db, user_id, ENTITY_CONFIGS["campaign"], batch_size)
+
+@app.post("/ad_campaigns/{campaign_id}/toggle", response_model=SingleObjectResponse)
+async def toggle_ad_campaign_active(
+    campaign_id: int,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    """Toggle is_active status for an ad campaign"""
+    return _handle_toggle_entity(campaign_id, db, user_id, ENTITY_CONFIGS["campaign"])
 
 # Ad Group endpoints
 @app.post("/ad_groups", response_model=SingleObjectResponse, status_code=201)
 async def create_ad_group(
-    ad_group: AdGroup,
+    ad_group: AdGroupCreate,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Create a new ad group"""
-    # Validate ad_campaign_id if provided
-    if ad_group.ad_campaign_id:
-        campaign = db.query(models.AdCampaign).filter(
-            models.AdCampaign.id == ad_group.ad_campaign_id,
-            models.AdCampaign.clerk_user_id == user_id
-        ).first()
-        if not campaign:
-            raise HTTPException(status_code=404, detail="Ad campaign not found")
-    
-    db_ad_group = models.AdGroup(
-        title=ad_group.title,
-        clerk_user_id=user_id,
-        ad_campaign_id=ad_group.ad_campaign_id
-    )
-    db.add(db_ad_group)
-    db.commit()
-    db.refresh(db_ad_group)
-    return SingleObjectResponse(
-        status="success",
-        message="Ad group created successfully",
-        object=AdGroup.model_validate(db_ad_group)
-    )
+    return _handle_create_entity(ad_group, db, user_id, ENTITY_CONFIGS["ad_group"])
 
 @app.get("/ad_groups", response_model=MultipleObjectsResponse)
 async def list_ad_groups(
     ad_campaign_id: Optional[int] = None,
-    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
-    page_size: int = Query(100, ge=1, le=100, description="Items per page (max 100)"),
+    page: int = Query(DEFAULT_PAGE, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description=f"Items per page (max {MAX_PAGE_SIZE})"),
+    search: Optional[str] = Query(None, description="Search by ad group title (case-insensitive, partial match)"),
+    is_active: Optional[bool] = Query(None, description="Filter by is_active status"),
+    created_after: Optional[datetime] = Query(None, description="Filter by created date (after)"),
+    created_before: Optional[datetime] = Query(None, description="Filter by created date (before)"),
+    updated_after: Optional[datetime] = Query(None, description="Filter by updated date (after)"),
+    updated_before: Optional[datetime] = Query(None, description="Filter by updated date (before)"),
+    sort_by: Optional[str] = Query("created", description="Sort by field: id, title, is_active, ad_campaign_id, created, updated"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """List all ad groups for the authenticated user with pagination"""
-    filters = [models.AdGroup.clerk_user_id == user_id]
-    if ad_campaign_id is not None:
-        filters.append(models.AdGroup.ad_campaign_id == ad_campaign_id)
-    query = db.query(models.AdGroup).filter(*filters)
-    ad_groups, total_count, total_pages = paginate_query(query, page, page_size)
-    
-    return MultipleObjectsResponse(
-        status="success",
-        objects=[AdGroup.model_validate(g) for g in ad_groups],
-        total=total_count,
-        page=page,
-        page_size=page_size,
-        total_pages=total_pages
+    """List all ad groups for the authenticated user with pagination, filters, and sorting"""
+    return _handle_list_entities(
+        db, user_id, ENTITY_CONFIGS["ad_group"], page, page_size, search, is_active,
+        created_after, created_before, updated_after, updated_before,
+        sort_by, sort_order, _get_ad_groups_metadata, ad_campaign_id
     )
 
 @app.get("/ad_groups/{ad_group_id}", response_model=SingleObjectResponse)
@@ -473,248 +1096,286 @@ async def get_ad_group(
     user_id: str = Depends(get_current_user_id)
 ):
     """Get a specific ad group by ID"""
-    ad_group = db.query(models.AdGroup).filter(
-        models.AdGroup.id == ad_group_id,
-        models.AdGroup.clerk_user_id == user_id
-    ).first()
-    if not ad_group:
-        raise HTTPException(status_code=404, detail="Ad group not found")
-    return SingleObjectResponse(
-        status="success",
-        object=AdGroup.model_validate(ad_group),
-        id=ad_group.id
-    )
+    return _handle_get_entity(ad_group_id, db, user_id, ENTITY_CONFIGS["ad_group"])
 
-
-@app.post("/ad_groups/{ad_group_id}/update", response_model=BulkOperationResponse)
+@app.post("/ad_groups/{ad_group_id}/update", response_model=SingleObjectResponse)
 async def update_ad_group(
     ad_group_id: int,
-    ad_group_update: AdGroup,
+    ad_group_update: AdGroupCreate,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Update an ad group"""
-    ad_group = db.query(models.AdGroup).filter(
-        models.AdGroup.id == ad_group_id,
-        models.AdGroup.clerk_user_id == user_id
-    ).first()
-    if not ad_group:
-        raise HTTPException(status_code=404, detail="Ad group not found")
-    
-    # Validate ad_campaign_id if provided
-    if ad_group_update.ad_campaign_id:
-        campaign = db.query(models.AdCampaign).filter(
-            models.AdCampaign.id == ad_group_update.ad_campaign_id,
-            models.AdCampaign.clerk_user_id == user_id
-        ).first()
-        if not campaign:
-            raise HTTPException(status_code=404, detail="Ad campaign not found")
-    
-    ad_group.title = ad_group_update.title
-    ad_group.ad_campaign_id = ad_group_update.ad_campaign_id
-    db.commit()
-    db.refresh(ad_group)
-    return BulkOperationResponse(
-        status="success",
-        message="Ad group updated successfully",
-        object={
-            "id": ad_group.id,
-            "title": ad_group.title,
-            "clerk_user_id": ad_group.clerk_user_id,
-            "ad_campaign_id": ad_group.ad_campaign_id,
-            "created": ad_group.created.isoformat(),
-            "updated": ad_group.updated.isoformat()
-        },
-        id=ad_group.id
-    )
+    return _handle_update_entity(ad_group_id, ad_group_update, db, user_id, ENTITY_CONFIGS["ad_group"])
 
-
-@app.post("/ad_groups/bulk/delete", response_model=BulkOperationResponse)
+@app.post("/ad_groups/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_ad_groups(
     delete_data: BulkDeleteRequest,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Bulk delete ad groups"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.AdGroup).filter(
-        models.AdGroup.id.in_(delete_data.ids),
-        models.AdGroup.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} ad groups",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
-    )
+    return _handle_bulk_delete(delete_data, db, user_id, ENTITY_CONFIGS["ad_group"], batch_size)
 
-
-# Helper functions for keyword operations
-def _validate_entity_ownership(
-    db: Session,
-    user_id: str,
-    company_ids: Optional[list[int]] = None,
-    ad_campaign_ids: Optional[list[int]] = None,
-    ad_group_ids: Optional[list[int]] = None
-) -> None:
-    """
-    Validate that all provided entity IDs belong to the user.
-    Raises HTTPException if validation fails.
-    """
-    # Validate ownership of companies if provided
-    if company_ids:
-        companies = db.query(models.Company).filter(
-            models.Company.id.in_(company_ids),
-            models.Company.clerk_user_id == user_id
-        ).all()
-        if len(companies) != len(company_ids):
-            raise HTTPException(
-                status_code=404,
-                detail="One or more companies not found or not owned by user"
-            )
-    
-    # Validate ownership of campaigns if provided
-    if ad_campaign_ids:
-        campaigns = db.query(models.AdCampaign).filter(
-            models.AdCampaign.id.in_(ad_campaign_ids),
-            models.AdCampaign.clerk_user_id == user_id
-        ).all()
-        if len(campaigns) != len(ad_campaign_ids):
-            raise HTTPException(
-                status_code=404,
-                detail="One or more campaigns not found or not owned by user"
-            )
-    
-    # Validate ownership of ad groups if provided
-    if ad_group_ids:
-        ad_groups = db.query(models.AdGroup).filter(
-            models.AdGroup.id.in_(ad_group_ids),
-            models.AdGroup.clerk_user_id == user_id
-        ).all()
-        if len(ad_groups) != len(ad_group_ids):
-            raise HTTPException(
-                status_code=404,
-                detail="One or more ad groups not found or not owned by user"
-            )
-
-
-def _validate_keywords_ownership(
-    db: Session,
-    user_id: str,
-    keyword_ids: list[int]
-) -> list:
-    """
-    Validate that all provided keyword IDs belong to the user.
-    Returns list of keyword objects.
-    Raises HTTPException if validation fails.
-    """
-    keywords = db.query(models.Keyword).filter(
-        models.Keyword.id.in_(keyword_ids),
-        models.Keyword.clerk_user_id == user_id
-    ).all()
-    
-    if len(keywords) != len(keyword_ids):
-        raise HTTPException(
-            status_code=404,
-            detail="One or more keywords not found or not owned by user"
-        )
-    
-    return keywords
-
-
-# Keyword endpoints
-@app.post("/keywords/bulk", response_model=BulkOperationResponse, status_code=201)
-async def create_bulk_keywords(
-    bulk_data: BulkKeywordCreate,
+@app.post("/ad_groups/{ad_group_id}/toggle", response_model=SingleObjectResponse)
+async def toggle_ad_group_active(
+    ad_group_id: int,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """
-    Bulk create keywords with optional relations to companies, campaigns, and ad groups.
+    """Toggle is_active status for an ad group"""
+    return _handle_toggle_entity(ad_group_id, db, user_id, ENTITY_CONFIGS["ad_group"])
+
+
+# Helper functions for keyword listing
+def _get_active_entity_ids(db: Session, user_id: str) -> tuple[list[int], list[int], list[int]]:
+    """Get IDs of all active entities for the user using a single optimized query per entity type."""
+    # Use scalar subqueries to get just the IDs efficiently
+    company_ids = db.query(models.Company.id).filter(
+        models.Company.clerk_user_id == user_id,
+        models.Company.is_active == True
+    ).all()
     
-    - Keywords are created (or retrieved if they already exist)
-    - Optionally associate with companies, campaigns, and/or ad groups
-    - Apply same match types to all relations
-    """
+    campaign_ids = db.query(models.AdCampaign.id).filter(
+        models.AdCampaign.clerk_user_id == user_id,
+        models.AdCampaign.is_active == True
+    ).all()
     
-    # Validate ownership of all entities
-    _validate_entity_ownership(
-        db=db,
-        user_id=user_id,
-        company_ids=bulk_data.company_ids,
-        ad_campaign_ids=bulk_data.ad_campaign_ids,
-        ad_group_ids=bulk_data.ad_group_ids
+    adgroup_ids = db.query(models.AdGroup.id).filter(
+        models.AdGroup.clerk_user_id == user_id,
+        models.AdGroup.is_active == True
+    ).all()
+    
+    return (
+        [c[0] for c in company_ids],
+        [c[0] for c in campaign_ids],
+        [a[0] for a in adgroup_ids]
     )
+
+
+def _create_match_type_condition(user_id: str, match_field: str):
+    """Create an EXISTS condition for a match type across all three relation tables."""
+    from sqlalchemy import or_, exists
     
-    # Default match types if not provided
-    match_types = bulk_data.match_types or MatchTypes()
+    return or_(
+        exists().where(
+            models.CompanyKeyword.keyword_id == models.Keyword.id,
+            models.CompanyKeyword.clerk_user_id == user_id,
+            getattr(models.CompanyKeyword, match_field) == True
+        ),
+        exists().where(
+            models.AdCampaignKeyword.keyword_id == models.Keyword.id,
+            models.AdCampaignKeyword.clerk_user_id == user_id,
+            getattr(models.AdCampaignKeyword, match_field) == True
+        ),
+        exists().where(
+            models.AdGroupKeyword.keyword_id == models.Keyword.id,
+            models.AdGroupKeyword.clerk_user_id == user_id,
+            getattr(models.AdGroupKeyword, match_field) == True
+        )
+    )
+
+
+def _create_match_type_sort_expr(user_id: str, match_field: str):
+    """Create a CASE expression for sorting by match type presence (returns 1 if present, 0 if not)."""
+    from sqlalchemy import case
     
+    condition = _create_match_type_condition(user_id, match_field)
+    return case((condition, 1), else_=0)
+
+
+def _format_match_types(relation) -> dict:
+    """Format match types from a relation object into a dictionary."""
+    return {
+        "broad": relation.broad,
+        "phrase": relation.phrase,
+        "exact": relation.exact,
+        "neg_broad": relation.neg_broad,
+        "neg_phrase": relation.neg_phrase,
+        "neg_exact": relation.neg_exact
+    }
+
+
+def _fetch_relations_bulk(
+    db: Session,
+    keyword_ids: list[int],
+    company_id_list: list[int],
+    campaign_id_list: list[int],
+    adgroup_id_list: list[int]
+) -> tuple[dict, dict, dict]:
+    """Fetch all relations for given keywords in bulk (3 queries instead of N*M queries)."""
+    # Fetch company relations
+    company_relations = {}
+    if company_id_list:
+        relations = db.query(models.CompanyKeyword).filter(
+            models.CompanyKeyword.keyword_id.in_(keyword_ids),
+            models.CompanyKeyword.company_id.in_(company_id_list)
+        ).all()
+        for rel in relations:
+            key = (rel.keyword_id, rel.company_id)
+            company_relations[key] = rel
+    
+    # Fetch campaign relations
+    campaign_relations = {}
+    if campaign_id_list:
+        relations = db.query(models.AdCampaignKeyword).filter(
+            models.AdCampaignKeyword.keyword_id.in_(keyword_ids),
+            models.AdCampaignKeyword.ad_campaign_id.in_(campaign_id_list)
+        ).all()
+        for rel in relations:
+            key = (rel.keyword_id, rel.ad_campaign_id)
+            campaign_relations[key] = rel
+    
+    # Fetch ad group relations
+    adgroup_relations = {}
+    if adgroup_id_list:
+        relations = db.query(models.AdGroupKeyword).filter(
+            models.AdGroupKeyword.keyword_id.in_(keyword_ids),
+            models.AdGroupKeyword.ad_group_id.in_(adgroup_id_list)
+        ).all()
+        for rel in relations:
+            key = (rel.keyword_id, rel.ad_group_id)
+            adgroup_relations[key] = rel
+    
+    return company_relations, campaign_relations, adgroup_relations
+
+
+def _build_matrix_keyword_data(
+    keyword,
+    company_id_list: list[int],
+    campaign_id_list: list[int],
+    adgroup_id_list: list[int],
+    company_relations: dict,
+    campaign_relations: dict,
+    adgroup_relations: dict
+) -> dict:
+    """Build keyword data in matrix format with entity columns using pre-fetched relations."""
+    keyword_data = {
+        "id": keyword.id,
+        "keyword": keyword.keyword,
+        "created": keyword.created,
+        "updated": keyword.updated,
+        "relations": {
+            "companies": {},
+            "ad_campaigns": {},
+            "ad_groups": {}
+        }
+    }
+    
+    # Add company match types as columns (lookup from pre-fetched dict)
+    for company_id in company_id_list:
+        relation = company_relations.get((keyword.id, company_id))
+        if relation:
+            keyword_data["relations"]["companies"][company_id] = _format_match_types(relation)
+    
+    # Add campaign match types as columns (lookup from pre-fetched dict)
+    for campaign_id in campaign_id_list:
+        relation = campaign_relations.get((keyword.id, campaign_id))
+        if relation:
+            keyword_data["relations"]["ad_campaigns"][campaign_id] = _format_match_types(relation)
+    
+    # Add ad group match types as columns (lookup from pre-fetched dict)
+    for adgroup_id in adgroup_id_list:
+        relation = adgroup_relations.get((keyword.id, adgroup_id))
+        if relation:
+            keyword_data["relations"]["ad_groups"][adgroup_id] = _format_match_types(relation)
+    
+    return keyword_data
+
+
+# Keyword endpoints
+@app.post("/keywords/bulk", response_model=BulkKeywordCreateResponse, status_code=201)
+async def create_bulk_keywords(
+    bulk_data: BulkKeywordCreate,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
     created_keywords = []
     existing_keywords = []
+    total_relations_created = 0
+    total_relations_updated = 0
+    batches_processed = 0
     
-    for keyword_text in bulk_data.keywords:
-        keyword_text = keyword_text.strip()
-        if not keyword_text:
-            continue
+    # Process keywords in batches
+    for keyword_batch in process_in_batches(bulk_data.keywords, batch_size=batch_size):
+        batch_created = []
+        batch_existing = []
+        batch_relations_created = 0
+        batch_relations_updated = 0
+        
+        for keyword_text in keyword_batch:
+            keyword_text = keyword_text.strip()
+            if not keyword_text:
+                continue
+                
+            # Try to get existing keyword or create new one
+            keyword = db.query(models.Keyword).filter(
+                models.Keyword.keyword == keyword_text,
+                models.Keyword.clerk_user_id == user_id
+            ).first()
             
-        # Try to get existing keyword or create new one
-        keyword = db.query(models.Keyword).filter(
-            models.Keyword.keyword == keyword_text,
-            models.Keyword.clerk_user_id == user_id
-        ).first()
-        
-        if keyword:
-            existing_keywords.append(keyword)
-        else:
-            keyword = models.Keyword(
-                keyword=keyword_text,
-                clerk_user_id=user_id
+            if keyword:
+                batch_existing.append(keyword)
+            else:
+                keyword = models.Keyword(
+                    keyword=keyword_text,
+                    clerk_user_id=user_id
+                )
+                db.add(keyword)
+                db.flush()  # Get the ID without committing
+                batch_created.append(keyword)
+            
+            # Create relations using helper function
+            added, updated = _create_keyword_relations(
+                db=db,
+                keyword=keyword,
+                company_ids=bulk_data.company_ids,
+                ad_campaign_ids=bulk_data.ad_campaign_ids,
+                ad_group_ids=bulk_data.ad_group_ids,
+                broad=bulk_data.broad,
+                phrase=bulk_data.phrase,
+                exact=bulk_data.exact,
+                neg_broad=bulk_data.neg_broad,
+                neg_phrase=bulk_data.neg_phrase,
+                neg_exact=bulk_data.neg_exact,
+                override_broad=bulk_data.override_broad,
+                override_phrase=bulk_data.override_phrase,
+                override_exact=bulk_data.override_exact,
+                override_neg_broad=bulk_data.override_neg_broad,
+                override_neg_phrase=bulk_data.override_neg_phrase,
+                override_neg_exact=bulk_data.override_neg_exact
             )
-            db.add(keyword)
-            db.flush()  # Get the ID without committing
-            created_keywords.append(keyword)
+            batch_relations_created += added
+            batch_relations_updated += updated
         
-        # Create relations using helper function
-        _create_keyword_relations(
-            db=db,
-            keyword=keyword,
-            company_ids=bulk_data.company_ids,
-            ad_campaign_ids=bulk_data.ad_campaign_ids,
-            ad_group_ids=bulk_data.ad_group_ids,
-            match_types=match_types,
-            override_broad=bulk_data.override_broad,
-            override_phrase=bulk_data.override_phrase,
-            override_exact=bulk_data.override_exact,
-            override_neg_broad=bulk_data.override_neg_broad,
-            override_neg_phrase=bulk_data.override_neg_phrase,
-            override_neg_exact=bulk_data.override_neg_exact
-        )
-    
-    # Commit all changes
-    db.commit()
+        # Commit after each batch
+        db.commit()
+        created_keywords.extend(batch_created)
+        existing_keywords.extend(batch_existing)
+        total_relations_created += batch_relations_created
+        total_relations_updated += batch_relations_updated
+        batches_processed += 1
     
     # Calculate totals
     all_keywords = created_keywords + existing_keywords
     
-    return BulkOperationResponse(
-        status="success",
+    return BulkKeywordCreateResponse(
         message=f"Created {len(created_keywords)} new keywords, found {len(existing_keywords)} existing",
+        objects=[Keyword.model_validate(k) for k in all_keywords],
         created=len(created_keywords),
         existing=len(existing_keywords),
-        total=len(all_keywords)
+        processed=len(all_keywords),
+        requested=len(bulk_data.keywords),
+        relations_created=total_relations_created,
+        relations_updated=total_relations_updated,
+        batches_processed=batches_processed,
+        batch_size=batch_size
     )
 
 
 def _update_relation_match_types(assoc, update_data: BulkKeywordUpdateRelations) -> bool:
-    """
-    Helper function to update match types on a relation object.
-    Returns True if any field was updated, False otherwise.
-    """
     updated = False
     
     if update_data.override_broad and update_data.broad is not None:
@@ -742,47 +1403,30 @@ def _update_relation_match_types(assoc, update_data: BulkKeywordUpdateRelations)
 def _create_keyword_relations(
     db: Session,
     keyword,
-    company_ids: Optional[list[int]],
-    ad_campaign_ids: Optional[list[int]],
-    ad_group_ids: Optional[list[int]],
-    match_types: MatchTypes,
-    override_broad: bool = False,
-    override_phrase: bool = False,
-    override_exact: bool = False,
-    override_neg_broad: bool = False,
-    override_neg_phrase: bool = False,
-    override_neg_exact: bool = False
+    company_ids: list[int],
+    ad_campaign_ids: list[int],
+    ad_group_ids: list[int],
+    broad: bool,
+    phrase: bool,
+    exact: bool,
+    neg_broad: bool,
+    neg_phrase: bool,
+    neg_exact: bool,
+    override_broad: bool,
+    override_phrase: bool,
+    override_exact: bool,
+    override_neg_broad: bool,
+    override_neg_phrase: bool,
+    override_neg_exact: bool
 ) -> tuple[int, int]:
-    """
-    Helper function to create relations for a keyword.
     
-    Args:
-        db: Database session
-        keyword: Keyword object
-        company_ids: List of company IDs to associate
-        ad_campaign_ids: List of campaign IDs to associate
-        ad_group_ids: List of ad group IDs to associate
-        match_types: Match types to apply
-        override_broad: If True, update broad match type for existing relations
-        override_phrase: If True, update phrase match type for existing relations
-        override_exact: If True, update exact match type for existing relations
-        override_neg_broad: If True, update neg_broad match type for existing relations
-        override_neg_phrase: If True, update neg_phrase match type for existing relations
-        override_neg_exact: If True, update neg_exact match type for existing relations
-    
-    Returns:
-        Tuple of (relations_added, relations_updated)
-    """
+    # Match types are now always provided with defaults
     
     def _process_entity_relations(
         entity_ids: list[int],
         model_class,
         entity_id_field: str
     ) -> tuple[int, int]:
-        """
-        Helper to process relations for a specific entity type.
-        Returns (added_count, updated_count)
-        """
         added = 0
         updated = 0
         
@@ -798,22 +1442,22 @@ def _create_keyword_relations(
                 # Update existing relation if any override flag is True
                 relation_updated = False
                 if override_broad:
-                    existing.broad = match_types.broad
+                    existing.broad = broad
                     relation_updated = True
                 if override_phrase:
-                    existing.phrase = match_types.phrase
+                    existing.phrase = phrase
                     relation_updated = True
                 if override_exact:
-                    existing.exact = match_types.exact
+                    existing.exact = exact
                     relation_updated = True
                 if override_neg_broad:
-                    existing.neg_broad = match_types.neg_broad
+                    existing.neg_broad = neg_broad
                     relation_updated = True
                 if override_neg_phrase:
-                    existing.neg_phrase = match_types.neg_phrase
+                    existing.neg_phrase = neg_phrase
                     relation_updated = True
                 if override_neg_exact:
-                    existing.neg_exact = match_types.neg_exact
+                    existing.neg_exact = neg_exact
                     relation_updated = True
                 
                 if relation_updated:
@@ -823,12 +1467,13 @@ def _create_keyword_relations(
                 create_kwargs = {
                     entity_id_field: entity_id,
                     'keyword_id': keyword.id,
-                    'broad': match_types.broad,
-                    'phrase': match_types.phrase,
-                    'exact': match_types.exact,
-                    'neg_broad': match_types.neg_broad,
-                    'neg_phrase': match_types.neg_phrase,
-                    'neg_exact': match_types.neg_exact
+                    'clerk_user_id': keyword.clerk_user_id,
+                    'broad': broad,
+                    'phrase': phrase,
+                    'exact': exact,
+                    'neg_broad': neg_broad,
+                    'neg_phrase': neg_phrase,
+                    'neg_exact': neg_exact
                 }
                 new_relation = model_class(**create_kwargs)
                 db.add(new_relation)
@@ -836,7 +1481,7 @@ def _create_keyword_relations(
         
         return added, updated
     
-    relations_added = 0
+    relations_created = 0
     relations_updated = 0
     
     # Handle company relations
@@ -846,7 +1491,7 @@ def _create_keyword_relations(
             models.CompanyKeyword, 
             'company_id'
         )
-        relations_added += added
+        relations_created += added
         relations_updated += updated
     
     # Handle campaign relations
@@ -856,7 +1501,7 @@ def _create_keyword_relations(
             models.AdCampaignKeyword,
             'ad_campaign_id'
         )
-        relations_added += added
+        relations_created += added
         relations_updated += updated
     
     # Handle ad group relations
@@ -866,79 +1511,63 @@ def _create_keyword_relations(
             models.AdGroupKeyword,
             'ad_group_id'
         )
-        relations_added += added
+        relations_created += added
         relations_updated += updated
     
-    return relations_added, relations_updated
+    return relations_created, relations_updated
 
 
-@app.post("/keywords/bulk/relations/update", response_model=BulkOperationResponse)
+@app.post("/keywords/bulk/relations/update", response_model=BulkRelationUpdateResponse)
 async def bulk_update_keyword_relations(
     update_data: BulkKeywordUpdateRelations,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """
-    Bulk update match types for existing keyword relations.
-    
-    Updates match types for ALL existing relations of the specified keywords
-    (companies, campaigns, ad groups) based on the override flags.
-    
-    Processes keywords in batches of 25 to avoid memory issues.
-    Maximum 100 keywords per request.
-    
-    For each match type field (broad, phrase, exact, neg_broad, neg_phrase, neg_exact):
-    - If override_{field}=True: Update the field to the provided value
-    - If override_{field}=False: Leave the field unchanged
-    
-    Example: To enable 'broad' and disable 'exact' for all relations:
-    {
-        "keyword_ids": [1, 2, 3],
-        "broad": true,
-        "exact": false,
-        "override_broad": true,
-        "override_exact": true
-    }
-    """
-    
-    # Limit to 100 keywords per request
-    if len(update_data.keyword_ids) > 100:
+    # Limit to MAX_KEYWORDS_PER_REQUEST keywords per request
+    if len(update_data.keyword_ids) > MAX_KEYWORDS_PER_REQUEST:
         raise HTTPException(
             status_code=400,
-            detail="Maximum 100 keywords allowed per request"
+            detail=f"Maximum {MAX_KEYWORDS_PER_REQUEST} keywords allowed per request"
         )
     
-    # Validate keywords belong to user
-    keywords = _validate_keywords_ownership(db, user_id, update_data.keyword_ids)
+    # Get keywords that belong to user
+    keywords = db.query(models.Keyword).filter(
+        models.Keyword.id.in_(update_data.keyword_ids),
+        models.Keyword.clerk_user_id == user_id
+    ).all()
     
     relations_updated = 0
     batches_processed = 0
     
-    # Process keywords in batches of 25
-    for keyword_batch in process_in_batches(keywords, batch_size=25):
+    # Process keywords in batches of DEFAULT_BATCH_SIZE
+    for keyword_batch in process_in_batches(keywords, batch_size=batch_size):
         # Process each keyword in the batch
         for keyword in keyword_batch:
-            # Update company relations
+            # Update company relations (with ownership check)
             company_relations = db.query(models.CompanyKeyword).filter(
-                models.CompanyKeyword.keyword_id == keyword.id
+                models.CompanyKeyword.keyword_id == keyword.id,
+                models.CompanyKeyword.clerk_user_id == user_id
             ).all()
             
             for assoc in company_relations:
                 if _update_relation_match_types(assoc, update_data):
                     relations_updated += 1
             
-            # Update campaign relations
+            # Update campaign relations (with ownership check)
             campaign_relations = db.query(models.AdCampaignKeyword).filter(
-                models.AdCampaignKeyword.keyword_id == keyword.id
+                models.AdCampaignKeyword.keyword_id == keyword.id,
+                models.AdCampaignKeyword.clerk_user_id == user_id
             ).all()
             
             for assoc in campaign_relations:
                 if _update_relation_match_types(assoc, update_data):
                     relations_updated += 1
             
-            # Update ad group relations
+            # Update ad group relations (with ownership check)
             ad_group_relations = db.query(models.AdGroupKeyword).filter(
-                models.AdGroupKeyword.keyword_id == keyword.id
+                models.AdGroupKeyword.keyword_id == keyword.id,
+                models.AdGroupKeyword.clerk_user_id == user_id
             ).all()
             
             for assoc in ad_group_relations:
@@ -949,110 +1578,286 @@ async def bulk_update_keyword_relations(
         db.commit()
         batches_processed += 1
     
-    return BulkOperationResponse(
-        status="success",
-        message=f"Updated {relations_updated} relations for {len(keywords)} keywords in {batches_processed} batches",
-        updated=len(keywords),
-        relations_added=0,
-        relations_updated=relations_updated,
+    return BulkRelationUpdateResponse(
+        message=f"Updated {relations_updated} relations for {len(keywords)} keywords",
+        processed=len(keywords),
+        requested=len(update_data.keyword_ids),
+        updated=relations_updated,
         batches_processed=batches_processed,
-        batch_size=25
+        batch_size=batch_size
     )
 
 
-@app.post("/keywords/bulk/relations", response_model=BulkOperationResponse)
+@app.post("/keywords/bulk/relations", response_model=BulkRelationCreateResponse)
 async def bulk_create_keyword_relations(
     create_data: BulkKeywordCreateRelations,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """
-    Create new relations for existing keywords with companies, campaigns, or ad groups.
+    # Get keywords that belong to user
+    keywords = db.query(models.Keyword).filter(
+        models.Keyword.id.in_(create_data.keyword_ids),
+        models.Keyword.clerk_user_id == user_id
+    ).all()
     
-    - Creates new relations if they don't exist
-    - For existing relations: Updates match types only for fields where override_{field}=True
-    - For fields where override_{field}=False: Keeps existing values
-    
-    Example: Associate keywords 1, 2, 3 with companies 5, 6 with broad and phrase match,
-    and update existing relations' broad match type:
-    {
-        "keyword_ids": [1, 2, 3],
-        "company_ids": [5, 6],
-        "match_types": {
-            "broad": true,
-            "phrase": true
-        },
-        "override_broad": true
-    }
-    """
-    
-    # Validate keywords belong to user
-    keywords = _validate_keywords_ownership(db, user_id, create_data.keyword_ids)
-    
-    # Validate ownership of all entities
-    _validate_entity_ownership(
-        db=db,
-        user_id=user_id,
-        company_ids=create_data.company_ids,
-        ad_campaign_ids=create_data.ad_campaign_ids,
-        ad_group_ids=create_data.ad_group_ids
-    )
-    
-    # Default match types if not provided
-    match_types = create_data.match_types or MatchTypes()
-    
-    total_relations_added = 0
+    total_relations_created = 0
     total_relations_updated = 0
+    batches_processed = 0
     
-    # Process each keyword
-    for keyword in keywords:
-        added, updated = _create_keyword_relations(
-            db=db,
-            keyword=keyword,
-            company_ids=create_data.company_ids,
-            ad_campaign_ids=create_data.ad_campaign_ids,
-            ad_group_ids=create_data.ad_group_ids,
-            match_types=match_types,
-            override_broad=create_data.override_broad,
-            override_phrase=create_data.override_phrase,
-            override_exact=create_data.override_exact,
-            override_neg_broad=create_data.override_neg_broad,
-            override_neg_phrase=create_data.override_neg_phrase,
-            override_neg_exact=create_data.override_neg_exact
-        )
-        total_relations_added += added
-        total_relations_updated += updated
+    # Process keywords in batches
+    for keyword_batch in process_in_batches(keywords, batch_size=batch_size):
+        batch_relations_created = 0
+        batch_relations_updated = 0
+        
+        # Process each keyword in the batch
+        for keyword in keyword_batch:
+            added, updated = _create_keyword_relations(
+                db=db,
+                keyword=keyword,
+                company_ids=create_data.company_ids,
+                ad_campaign_ids=create_data.ad_campaign_ids,
+                ad_group_ids=create_data.ad_group_ids,
+                broad=create_data.broad,
+                phrase=create_data.phrase,
+                exact=create_data.exact,
+                neg_broad=create_data.neg_broad,
+                neg_phrase=create_data.neg_phrase,
+                neg_exact=create_data.neg_exact,
+                override_broad=create_data.override_broad,
+                override_phrase=create_data.override_phrase,
+                override_exact=create_data.override_exact,
+                override_neg_broad=create_data.override_neg_broad,
+                override_neg_phrase=create_data.override_neg_phrase,
+                override_neg_exact=create_data.override_neg_exact
+            )
+            batch_relations_created += added
+            batch_relations_updated += updated
+        
+        # Commit after each batch
+        db.commit()
+        total_relations_created += batch_relations_created
+        total_relations_updated += batch_relations_updated
+        batches_processed += 1
     
-    # Commit all changes
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Processed {len(keywords)} keywords: added {total_relations_added} relations, updated {total_relations_updated}",
+    return BulkRelationCreateResponse(
+        message=f"Processed {len(keywords)} keywords",
         processed=len(keywords),
-        relations_added=total_relations_added,
-        relations_updated=total_relations_updated
+        requested=len(create_data.keyword_ids),
+        created=total_relations_created,
+        updated=total_relations_updated,
+        batches_processed=batches_processed,
+        batch_size=batch_size
     )
 
 
 @app.get("/keywords", response_model=MultipleObjectsResponse)
 async def list_keywords(
-    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
-    page_size: int = Query(100, ge=1, le=100, description="Items per page (max 100)"),
+    page: int = Query(DEFAULT_PAGE, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description=f"Items per page (max {MAX_PAGE_SIZE})"),
+    only_attached: bool = Query(False, description="Show only keywords attached to at least one entity"),
+    search: Optional[str] = Query(None, description="Search by keyword text (case-insensitive, partial match)"),
+    created_after: Optional[datetime] = Query(None, description="Filter by created date (after)"),
+    created_before: Optional[datetime] = Query(None, description="Filter by created date (before)"),
+    updated_after: Optional[datetime] = Query(None, description="Filter by updated date (after)"),
+    updated_before: Optional[datetime] = Query(None, description="Filter by updated date (before)"),
+    has_broad: Optional[bool] = Query(None, description="Filter keywords with at least one broad match relation"),
+    has_phrase: Optional[bool] = Query(None, description="Filter keywords with at least one phrase match relation"),
+    has_exact: Optional[bool] = Query(None, description="Filter keywords with at least one exact match relation"),
+    has_neg_broad: Optional[bool] = Query(None, description="Filter keywords with at least one negative broad match relation"),
+    has_neg_phrase: Optional[bool] = Query(None, description="Filter keywords with at least one negative phrase match relation"),
+    has_neg_exact: Optional[bool] = Query(None, description="Filter keywords with at least one negative exact match relation"),
+    sort_by: Optional[str] = Query("created", description="Primary sort field: id, keyword, created, updated, has_broad, has_phrase, has_exact, has_neg_broad, has_neg_phrase, has_neg_exact"),
+    sort_order: Optional[str] = Query("desc", description="Primary sort order: asc or desc"),
+    sort_by_2: Optional[str] = Query(None, description="Secondary sort field (same options as sort_by)"),
+    sort_order_2: Optional[str] = Query(None, description="Secondary sort order: asc or desc"),
+    sort_by_3: Optional[str] = Query(None, description="Tertiary sort field (same options as sort_by)"),
+    sort_order_3: Optional[str] = Query(None, description="Tertiary sort order: asc or desc"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """List all keywords for the authenticated user with pagination"""
+    from sqlalchemy import or_, exists, and_, case, func, select
+    
+    # Get active entity IDs efficiently (just IDs, not full objects)
+    company_id_list, campaign_id_list, adgroup_id_list = _get_active_entity_ids(db, user_id)
+    
+    # Build base query - start with user filter
     query = db.query(models.Keyword).filter(models.Keyword.clerk_user_id == user_id)
+    
+    # Add search filter if provided
+    if search:
+        query = query.filter(models.Keyword.keyword.ilike(f"%{search}%"))
+    
+    # Add date filters
+    if created_after:
+        query = query.filter(models.Keyword.created >= created_after)
+    if created_before:
+        query = query.filter(models.Keyword.created <= created_before)
+    if updated_after:
+        query = query.filter(models.Keyword.updated >= updated_after)
+    if updated_before:
+        query = query.filter(models.Keyword.updated <= updated_before)
+    
+    # Add match type filters using helper function
+    match_type_params = {
+        'broad': has_broad,
+        'phrase': has_phrase,
+        'exact': has_exact,
+        'neg_broad': has_neg_broad,
+        'neg_phrase': has_neg_phrase,
+        'neg_exact': has_neg_exact
+    }
+    
+    match_type_filters = []
+    for match_field, has_match in match_type_params.items():
+        if has_match is not None:
+            condition = _create_match_type_condition(user_id, match_field)
+            match_type_filters.append(condition if has_match else ~condition)
+    
+    # Apply match type filters (AND condition - all must be satisfied)
+    if match_type_filters:
+        query = query.filter(and_(*match_type_filters))
+    
+    # Filter keywords that have relations with active entities (OR condition)
+    # Use EXISTS subqueries for optimal performance
+    # Only apply if there are active entities to filter by
+    if company_id_list or campaign_id_list or adgroup_id_list:
+        filters = []
+        
+        if company_id_list:
+            filters.append(
+                exists().where(
+                    models.CompanyKeyword.keyword_id == models.Keyword.id,
+                    models.CompanyKeyword.company_id.in_(company_id_list)
+                )
+            )
+        
+        if campaign_id_list:
+            filters.append(
+                exists().where(
+                    models.AdCampaignKeyword.keyword_id == models.Keyword.id,
+                    models.AdCampaignKeyword.ad_campaign_id.in_(campaign_id_list)
+                )
+            )
+        
+        if adgroup_id_list:
+            filters.append(
+                exists().where(
+                    models.AdGroupKeyword.keyword_id == models.Keyword.id,
+                    models.AdGroupKeyword.ad_group_id.in_(adgroup_id_list)
+                )
+            )
+        
+        query = query.filter(or_(*filters))
+    
+    # If only_attached is True, add filter for keywords with at least one relation
+    if only_attached:
+        # Use EXISTS subqueries for all three relation types (OR condition)
+        query = query.filter(
+            or_(
+                exists().where(
+                    models.CompanyKeyword.keyword_id == models.Keyword.id,
+                    models.CompanyKeyword.clerk_user_id == user_id
+                ),
+                exists().where(
+                    models.AdCampaignKeyword.keyword_id == models.Keyword.id,
+                    models.AdCampaignKeyword.clerk_user_id == user_id
+                ),
+                exists().where(
+                    models.AdGroupKeyword.keyword_id == models.Keyword.id,
+                    models.AdGroupKeyword.clerk_user_id == user_id
+                )
+            )
+        )
+    
+    # Helper function to create match type sorting expressions
+    def _get_sort_column(field_name: str):
+        """Get the column or expression for sorting."""
+        field_name = field_name.lower()
+        
+        # Simple field mappings
+        simple_fields = {
+            "id": models.Keyword.id,
+            "keyword": models.Keyword.keyword,
+            "created": models.Keyword.created,
+            "updated": models.Keyword.updated
+        }
+        
+        if field_name in simple_fields:
+            return simple_fields[field_name]
+        
+        # Match type fields - use helper function
+        match_type_map = {
+            "has_broad": "broad",
+            "has_phrase": "phrase",
+            "has_exact": "exact",
+            "has_neg_broad": "neg_broad",
+            "has_neg_phrase": "neg_phrase",
+            "has_neg_exact": "neg_exact"
+        }
+        
+        if field_name in match_type_map:
+            return _create_match_type_sort_expr(user_id, match_type_map[field_name])
+        
+        return None
+    
+    # Add sorting (up to 3 levels)
+    sort_configs = [
+        (sort_by, sort_order),
+        (sort_by_2, sort_order_2),
+        (sort_by_3, sort_order_3)
+    ]
+    
+    order_columns = []
+    for sort_field, sort_dir in sort_configs:
+        if sort_field:
+            sort_column = _get_sort_column(sort_field)
+            if sort_column is not None:
+                direction = (sort_dir or "desc").lower()
+                if direction == "asc":
+                    order_columns.append(sort_column.asc())
+                else:
+                    order_columns.append(sort_column.desc())
+    
+    # Apply sorting or default to created desc
+    if order_columns:
+        query = query.order_by(*order_columns)
+    else:
+        query = query.order_by(models.Keyword.created.desc())
+    
+    # Apply pagination AFTER all filters and sorting
     keywords, total_count, total_pages = paginate_query(query, page, page_size)
     
+    # Always use matrix format - fetch all relations in bulk (3 queries instead of N*M queries)
+    # When there are no active entities, the lists are empty and relations will be empty dicts
+    keyword_ids = [k.id for k in keywords]
+    company_relations, campaign_relations, adgroup_relations = _fetch_relations_bulk(
+        db, keyword_ids, company_id_list, campaign_id_list, adgroup_id_list
+    )
+    
+    # Build keyword data using pre-fetched relations (or empty dicts if no active entities)
+    result_objects = [
+        _build_matrix_keyword_data(
+            keyword, company_id_list, campaign_id_list, adgroup_id_list,
+            company_relations, campaign_relations, adgroup_relations
+        )
+        for keyword in keywords
+    ]
+    
+    filters, sorting, special_features = _get_keywords_metadata()
+    
     return MultipleObjectsResponse(
-        status="success",
-        objects=[Keyword.model_validate(k) for k in keywords],
-        total=total_count,
-        page=page,
-        page_size=page_size,
-        total_pages=total_pages
+        message=f"Retrieved {total_count} keywords",
+        objects=result_objects,
+        pagination={
+            "total": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages
+        },
+        filters=filters,
+        sorting=sorting,
+        special_features=special_features
     )
 
 
@@ -1063,671 +1868,107 @@ async def get_keyword(
     user_id: str = Depends(get_current_user_id)
 ):
     """Get a specific keyword by ID"""
-    keyword = db.query(models.Keyword).filter(
-        models.Keyword.id == keyword_id,
-        models.Keyword.clerk_user_id == user_id
-    ).first()
-    if not keyword:
-        raise HTTPException(status_code=404, detail="Keyword not found")
-    return SingleObjectResponse(
-        status="success",
-        object=Keyword.model_validate(keyword),
-        id=keyword.id
+    return _get_entity_by_id(
+        db=db,
+        user_id=user_id,
+        entity_id=keyword_id,
+        model_class=models.Keyword,
+        schema_class=Keyword,
+        entity_name="keyword"
     )
 
 
-@app.post("/keywords/{keyword_id}/update", response_model=BulkOperationResponse)
+@app.post("/keywords/{keyword_id}/update", response_model=SingleObjectResponse)
 async def update_keyword(
     keyword_id: int,
-    keyword_update: Keyword,
+    keyword_update: KeywordCreate,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Update a keyword"""
-    keyword = db.query(models.Keyword).filter(
-        models.Keyword.id == keyword_id,
-        models.Keyword.clerk_user_id == user_id
-    ).first()
-    if not keyword:
-        raise HTTPException(status_code=404, detail="Keyword not found")
-    
-    keyword.keyword = keyword_update.keyword
-    db.commit()
-    db.refresh(keyword)
-    return BulkOperationResponse(
-        status="success",
-        message="Keyword updated successfully",
-        object={
-            "id": keyword.id,
-            "keyword": keyword.keyword,
-            "clerk_user_id": keyword.clerk_user_id,
-            "created": keyword.created.isoformat(),
-            "updated": keyword.updated.isoformat()
-        },
-        id=keyword.id
+    return _update_simple_entity(
+        db=db,
+        user_id=user_id,
+        entity_id=keyword_id,
+        entity_update=keyword_update,
+        model_class=models.Keyword,
+        schema_class=Keyword,
+        entity_name="keyword",
+        update_fields={"keyword": keyword_update.keyword}
     )
 
 
-@app.post("/keywords/bulk/delete", response_model=BulkOperationResponse)
+@app.post("/keywords/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_keywords(
     delete_data: BulkDeleteRequest,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Bulk delete keywords"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.Keyword).filter(
-        models.Keyword.id.in_(delete_data.ids),
-        models.Keyword.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} keywords",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
+    return _bulk_delete_with_batches(
+        db=db,
+        user_id=user_id,
+        ids=delete_data.ids,
+        model_class=models.Keyword,
+        ownership_field="clerk_user_id",
+        message_template="Deleted {0} keywords",
+        batch_size=batch_size
     )
 
 
-@app.post("/relations/company-keyword/bulk/delete", response_model=BulkOperationResponse)
+@app.post("/relations/ad_company_keyword/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_company_keyword_relations(
     delete_data: BulkDeleteRequest,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """Bulk delete company-keyword relations"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.CompanyKeyword).join(
-        models.Keyword
-    ).filter(
-        models.CompanyKeyword.id.in_(delete_data.ids),
-        models.Keyword.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} company-keyword relations",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
+    """Bulk delete ad_company_keyword relations"""
+    return _bulk_delete_with_batches(
+        db=db,
+        user_id=user_id,
+        ids=delete_data.ids,
+        model_class=models.CompanyKeyword,
+        ownership_field="clerk_user_id",
+        message_template="Deleted {0} ad_company_keyword relations",
+        batch_size=batch_size
     )
 
 
-@app.post("/relations/campaign-keyword/bulk/delete", response_model=BulkOperationResponse)
+@app.post("/relations/ad_campaign_keyword/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_campaign_keyword_relations(
     delete_data: BulkDeleteRequest,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """Bulk delete campaign-keyword relations"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.AdCampaignKeyword).join(
-        models.Keyword
-    ).filter(
-        models.AdCampaignKeyword.id.in_(delete_data.ids),
-        models.Keyword.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} campaign-keyword relations",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
+    """Bulk delete ad_campaign_keyword relations"""
+    return _bulk_delete_with_batches(
+        db=db,
+        user_id=user_id,
+        ids=delete_data.ids,
+        model_class=models.AdCampaignKeyword,
+        ownership_field="clerk_user_id",
+        message_template="Deleted {0} ad_campaign_keyword relations",
+        batch_size=batch_size
     )
 
 
-@app.post("/relations/adgroup-keyword/bulk/delete", response_model=BulkOperationResponse)
+@app.post("/relations/ad_group_keyword/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_adgroup_keyword_relations(
     delete_data: BulkDeleteRequest,
+    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    """Bulk delete ad group-keyword relations"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.AdGroupKeyword).join(
-        models.Keyword
-    ).filter(
-        models.AdGroupKeyword.id.in_(delete_data.ids),
-        models.Keyword.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} adgroup-keyword relations",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
-    )
-
-
-# Filter helper functions
-def _validate_filters_ownership(
-    db: Session,
-    user_id: str,
-    filter_ids: list[int]
-) -> list:
-    """
-    Validate that all provided filter IDs belong to the user.
-    Returns list of filter objects.
-    Raises HTTPException if validation fails.
-    """
-    filters = db.query(models.Filter).filter(
-        models.Filter.id.in_(filter_ids),
-        models.Filter.clerk_user_id == user_id
-    ).all()
-    
-    if len(filters) != len(filter_ids):
-        raise HTTPException(
-            status_code=404,
-            detail="One or more filters not found or not owned by user"
-        )
-    
-    return filters
-
-
-def _create_filter_relations(
-    db: Session,
-    filter_obj,
-    company_ids: Optional[list[int]],
-    ad_campaign_ids: Optional[list[int]],
-    ad_group_ids: Optional[list[int]],
-    is_negative: bool = False
-) -> tuple[int, int]:
-    """
-    Helper function to create relations for a filter.
-    
-    Args:
-        db: Database session
-        filter_obj: Filter object
-        company_ids: List of company IDs to associate
-        ad_campaign_ids: List of campaign IDs to associate
-        ad_group_ids: List of ad group IDs to associate
-        is_negative: Whether this is a negative filter
-    
-    Returns:
-        Tuple of (relations_added, relations_updated)
-    """
-    
-    def _process_entity_relations(
-        entity_ids: list[int],
-        model_class,
-        entity_id_field: str
-    ) -> tuple[int, int]:
-        """
-        Helper to process relations for a specific entity type.
-        Returns (added_count, updated_count)
-        """
-        added = 0
-        updated = 0
-        
-        for entity_id in entity_ids:
-            # Query for existing relation
-            filter_kwargs = {
-                entity_id_field: entity_id,
-                'filter_id': filter_obj.id
-            }
-            existing = db.query(model_class).filter_by(**filter_kwargs).first()
-            
-            if existing:
-                # Update existing relation
-                if existing.is_negative != is_negative:
-                    existing.is_negative = is_negative
-                    updated += 1
-            else:
-                # Create new relation
-                create_kwargs = {
-                    entity_id_field: entity_id,
-                    'filter_id': filter_obj.id,
-                    'is_negative': is_negative
-                }
-                new_relation = model_class(**create_kwargs)
-                db.add(new_relation)
-                added += 1
-        
-        return added, updated
-    
-    relations_added = 0
-    relations_updated = 0
-    
-    # Handle company relations
-    if company_ids:
-        added, updated = _process_entity_relations(
-            company_ids, 
-            models.CompanyFilter, 
-            'company_id'
-        )
-        relations_added += added
-        relations_updated += updated
-    
-    # Handle campaign relations
-    if ad_campaign_ids:
-        added, updated = _process_entity_relations(
-            ad_campaign_ids,
-            models.AdCampaignFilter,
-            'ad_campaign_id'
-        )
-        relations_added += added
-        relations_updated += updated
-    
-    # Handle ad group relations
-    if ad_group_ids:
-        added, updated = _process_entity_relations(
-            ad_group_ids,
-            models.AdGroupFilter,
-            'ad_group_id'
-        )
-        relations_added += added
-        relations_updated += updated
-    
-    return relations_added, relations_updated
-
-
-# Filter endpoints
-@app.post("/filters/bulk", response_model=BulkOperationResponse, status_code=201)
-async def create_bulk_filters(
-    bulk_data: BulkFilterCreate,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """
-    Bulk create filters with optional relations to companies, campaigns, and ad groups.
-    
-    - Filters are created (or retrieved if they already exist)
-    - Optionally associate with companies, campaigns, and/or ad groups
-    - Apply same is_negative flag to all relations
-    """
-    
-    # Validate ownership of all entities
-    _validate_entity_ownership(
+    """Bulk delete ad_group_keyword relations"""
+    return _bulk_delete_with_batches(
         db=db,
         user_id=user_id,
-        company_ids=bulk_data.company_ids,
-        ad_campaign_ids=bulk_data.ad_campaign_ids,
-        ad_group_ids=bulk_data.ad_group_ids
-    )
-    
-    created_filters = []
-    existing_filters = []
-    
-    for filter_text in bulk_data.filters:
-        filter_text = filter_text.strip()
-        if not filter_text:
-            continue
-            
-        # Try to get existing filter or create new one
-        filter_obj = db.query(models.Filter).filter(
-            models.Filter.filter == filter_text,
-            models.Filter.clerk_user_id == user_id
-        ).first()
-        
-        if filter_obj:
-            existing_filters.append(filter_obj)
-        else:
-            filter_obj = models.Filter(
-                filter=filter_text,
-                clerk_user_id=user_id
-            )
-            db.add(filter_obj)
-            db.flush()  # Get the ID without committing
-            created_filters.append(filter_obj)
-        
-        # Create relations using helper function
-        _create_filter_relations(
-            db=db,
-            filter_obj=filter_obj,
-            company_ids=bulk_data.company_ids,
-            ad_campaign_ids=bulk_data.ad_campaign_ids,
-            ad_group_ids=bulk_data.ad_group_ids,
-            is_negative=bulk_data.is_negative
-        )
-    
-    # Commit all changes
-    db.commit()
-    
-    # Calculate totals
-    all_filters = created_filters + existing_filters
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Created {len(created_filters)} new filters, found {len(existing_filters)} existing",
-        created=len(created_filters),
-        existing=len(existing_filters),
-        total=len(all_filters)
-    )
-
-
-@app.post("/filters/bulk/relations/update", response_model=BulkOperationResponse)
-async def bulk_update_filter_relations(
-    update_data: BulkFilterUpdateRelations,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """
-    Bulk update is_negative for existing filter relations.
-    
-    Updates is_negative for ALL existing relations of the specified filters
-    (companies, campaigns, ad groups).
-    
-    Processes filters in batches of 25 to avoid memory issues.
-    Maximum 100 filters per request.
-    
-    Example: To set is_negative=true for all relations:
-    {
-        "filter_ids": [1, 2, 3],
-        "is_negative": true
-    }
-    """
-    
-    # Limit to 100 filters per request
-    if len(update_data.filter_ids) > 100:
-        raise HTTPException(
-            status_code=400,
-            detail="Maximum 100 filters allowed per request"
-        )
-    
-    # Validate filters belong to user
-    filters = _validate_filters_ownership(db, user_id, update_data.filter_ids)
-    
-    relations_updated = 0
-    batches_processed = 0
-    
-    # Process filters in batches of 25
-    for filter_batch in process_in_batches(filters, batch_size=25):
-        # Process each filter in the batch
-        for filter_obj in filter_batch:
-            # Update company relations
-            company_relations = db.query(models.CompanyFilter).filter(
-                models.CompanyFilter.filter_id == filter_obj.id
-            ).all()
-            
-            for assoc in company_relations:
-                if assoc.is_negative != update_data.is_negative:
-                    assoc.is_negative = update_data.is_negative
-                    relations_updated += 1
-            
-            # Update campaign relations
-            campaign_relations = db.query(models.AdCampaignFilter).filter(
-                models.AdCampaignFilter.filter_id == filter_obj.id
-            ).all()
-            
-            for assoc in campaign_relations:
-                if assoc.is_negative != update_data.is_negative:
-                    assoc.is_negative = update_data.is_negative
-                    relations_updated += 1
-            
-            # Update ad group relations
-            ad_group_relations = db.query(models.AdGroupFilter).filter(
-                models.AdGroupFilter.filter_id == filter_obj.id
-            ).all()
-            
-            for assoc in ad_group_relations:
-                if assoc.is_negative != update_data.is_negative:
-                    assoc.is_negative = update_data.is_negative
-                    relations_updated += 1
-        
-        # Commit after each batch
-        db.commit()
-        batches_processed += 1
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Updated {relations_updated} relations for {len(filters)} filters in {batches_processed} batches",
-        updated=len(filters),
-        relations_added=0,
-        relations_updated=relations_updated,
-        batches_processed=batches_processed,
-        batch_size=25
-    )
-
-
-@app.post("/filters/bulk/relations", response_model=BulkOperationResponse)
-async def bulk_create_filter_relations(
-    create_data: BulkFilterCreateRelations,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """
-    Create new relations for existing filters with companies, campaigns, or ad groups.
-    
-    - Creates new relations if they don't exist
-    - Updates is_negative for existing relations
-    
-    Example: Associate filters 1, 2, 3 with companies 5, 6 as negative filters:
-    {
-        "filter_ids": [1, 2, 3],
-        "company_ids": [5, 6],
-        "is_negative": true
-    }
-    """
-    
-    # Validate filters belong to user
-    filters = _validate_filters_ownership(db, user_id, create_data.filter_ids)
-    
-    # Validate ownership of all entities
-    _validate_entity_ownership(
-        db=db,
-        user_id=user_id,
-        company_ids=create_data.company_ids,
-        ad_campaign_ids=create_data.ad_campaign_ids,
-        ad_group_ids=create_data.ad_group_ids
-    )
-    
-    total_relations_added = 0
-    total_relations_updated = 0
-    
-    # Process each filter
-    for filter_obj in filters:
-        added, updated = _create_filter_relations(
-            db=db,
-            filter_obj=filter_obj,
-            company_ids=create_data.company_ids,
-            ad_campaign_ids=create_data.ad_campaign_ids,
-            ad_group_ids=create_data.ad_group_ids,
-            is_negative=create_data.is_negative
-        )
-        total_relations_added += added
-        total_relations_updated += updated
-    
-    # Commit all changes
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Processed {len(filters)} filters: added {total_relations_added} relations, updated {total_relations_updated}",
-        processed=len(filters),
-        relations_added=total_relations_added,
-        relations_updated=total_relations_updated
-    )
-
-
-@app.get("/filters", response_model=MultipleObjectsResponse)
-async def list_filters(
-    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
-    page_size: int = Query(100, ge=1, le=100, description="Items per page (max 100)"),
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """List all filters for the authenticated user with pagination"""
-    query = db.query(models.Filter).filter(models.Filter.clerk_user_id == user_id)
-    filters, total_count, total_pages = paginate_query(query, page, page_size)
-    
-    return MultipleObjectsResponse(
-        status="success",
-        objects=[Filter.model_validate(f) for f in filters],
-        total=total_count,
-        page=page,
-        page_size=page_size,
-        total_pages=total_pages
-    )
-
-
-@app.get("/filters/{filter_id}", response_model=SingleObjectResponse)
-async def get_filter(
-    filter_id: int,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Get a specific filter by ID"""
-    filter_obj = db.query(models.Filter).filter(
-        models.Filter.id == filter_id,
-        models.Filter.clerk_user_id == user_id
-    ).first()
-    if not filter_obj:
-        raise HTTPException(status_code=404, detail="Filter not found")
-    return SingleObjectResponse(
-        status="success",
-        object=Filter.model_validate(filter_obj),
-        id=filter_obj.id
-    )
-
-
-@app.post("/filters/{filter_id}/update", response_model=BulkOperationResponse)
-async def update_filter(
-    filter_id: int,
-    filter_update: Filter,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Update a filter"""
-    filter_obj = db.query(models.Filter).filter(
-        models.Filter.id == filter_id,
-        models.Filter.clerk_user_id == user_id
-    ).first()
-    if not filter_obj:
-        raise HTTPException(status_code=404, detail="Filter not found")
-    
-    filter_obj.filter = filter_update.filter
-    db.commit()
-    db.refresh(filter_obj)
-    return BulkOperationResponse(
-        status="success",
-        message="Filter updated successfully",
-        object={
-            "id": filter_obj.id,
-            "filter": filter_obj.filter,
-            "clerk_user_id": filter_obj.clerk_user_id,
-            "created": filter_obj.created.isoformat(),
-            "updated": filter_obj.updated.isoformat()
-        },
-        id=filter_obj.id
-    )
-
-
-@app.post("/filters/bulk/delete", response_model=BulkOperationResponse)
-async def bulk_delete_filters(
-    delete_data: BulkDeleteRequest,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Bulk delete filters"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.Filter).filter(
-        models.Filter.id.in_(delete_data.ids),
-        models.Filter.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} filters",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
-    )
-
-
-@app.post("/relations/company-filter/bulk/delete", response_model=BulkOperationResponse)
-async def bulk_delete_company_filter_relations(
-    delete_data: BulkDeleteRequest,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Bulk delete company-filter relations"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.CompanyFilter).join(
-        models.Filter
-    ).filter(
-        models.CompanyFilter.id.in_(delete_data.ids),
-        models.Filter.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} company-filter relations",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
-    )
-
-
-@app.post("/relations/campaign-filter/bulk/delete", response_model=BulkOperationResponse)
-async def bulk_delete_campaign_filter_relations(
-    delete_data: BulkDeleteRequest,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Bulk delete campaign-filter relations"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.AdCampaignFilter).join(
-        models.Filter
-    ).filter(
-        models.AdCampaignFilter.id.in_(delete_data.ids),
-        models.Filter.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} campaign-filter relations",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
-    )
-
-
-@app.post("/relations/adgroup-filter/bulk/delete", response_model=BulkOperationResponse)
-async def bulk_delete_adgroup_filter_relations(
-    delete_data: BulkDeleteRequest,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Bulk delete ad group-filter relations"""
-    if not delete_data.ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-    
-    deleted_count = db.query(models.AdGroupFilter).join(
-        models.Filter
-    ).filter(
-        models.AdGroupFilter.id.in_(delete_data.ids),
-        models.Filter.clerk_user_id == user_id
-    ).delete(synchronize_session=False)
-    
-    db.commit()
-    
-    return BulkOperationResponse(
-        status="success",
-        message=f"Deleted {deleted_count} adgroup-filter relations",
-        deleted=deleted_count,
-        requested=len(delete_data.ids)
+        ids=delete_data.ids,
+        model_class=models.AdGroupKeyword,
+        ownership_field="clerk_user_id",
+        message_template="Deleted {0} ad_group_keyword relations",
+        batch_size=batch_size
     )

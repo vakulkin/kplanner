@@ -1,179 +1,190 @@
-from pydantic import BaseModel, ConfigDict
-from typing import Optional, List, Any
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import List, Any, Optional
 from datetime import datetime
 
 
 # ==================== Base Entity Schemas ====================
 
-# Match Types Schema (used for keyword associations)
-class MatchTypes(BaseModel):
-    broad: bool = False
-    phrase: bool = False
-    exact: bool = False
-    neg_broad: bool = False
-    neg_phrase: bool = False
-    neg_exact: bool = False
-
-
-# Base entity data model (for responses)
-class EntityData(BaseModel):
+# Base entity data model (for responses only)
+class EntityResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, exclude_none=True)
     
-    id: Optional[int] = None
-    clerk_user_id: Optional[str] = None
-    created: Optional[datetime] = None
-    updated: Optional[datetime] = None
+    id: int
+    created: datetime
+    updated: datetime
 
 
-# ==================== Entity Schemas (Used for both Create and Response) ====================
+# ==================== Base Schemas for Reusability ====================
 
-class Company(EntityData):
-    title: str
+class TitleActiveBase(BaseModel):
+    """Base schema for entities with title and is_active fields"""
+    title: str = Field(min_length=1, max_length=255)
+    is_active: bool
+
+    @field_validator('title')
+    @classmethod
+    def title_must_not_be_blank(cls, v):
+        if not v.strip():
+            raise ValueError('Title must not be empty or contain only whitespace')
+        return v.strip()
 
 
-class AdCampaign(EntityData):
-    title: str
-    company_id: Optional[int] = None
+# ==================== Create/Update Schemas ====================
+
+class CompanyCreate(TitleActiveBase):
+    """Schema for creating/updating companies. For create: omit id. For update: id ignored."""
+    pass
 
 
-class AdGroup(EntityData):
-    title: str
-    ad_campaign_id: Optional[int] = None
+class AdCampaignCreate(TitleActiveBase):
+    """Schema for creating/updating ad campaigns. For create: omit id. For update: id ignored."""
+    company_id: int
 
 
-class Keyword(EntityData):
+class AdGroupCreate(TitleActiveBase):
+    """Schema for creating/updating ad groups. For create: omit id. For update: id ignored."""
+    ad_campaign_id: int
+
+
+class KeywordCreate(BaseModel):
     keyword: str
 
 
-class Filter(EntityData):
-    filter: str
+# ==================== Response Schemas (Output - includes all fields) ====================
+
+class Company(EntityResponse, CompanyCreate):
+    pass
 
 
-# ==================== Response Wrappers (All include status) ====================
+class AdCampaign(EntityResponse, AdCampaignCreate):
+    company_id: int
+
+
+class AdGroup(EntityResponse, AdGroupCreate):
+    ad_campaign_id: int
+
+
+class Keyword(EntityResponse, KeywordCreate):
+    pass
+
+
+# ==================== Response Wrappers (All include) ====================
 
 class SingleObjectResponse(BaseModel):
     """Response for single entity operations (create, update, get)"""
     model_config = ConfigDict(exclude_none=True)
-    
-    status: str  # "success" or "error"
-    message: Optional[str] = None
-    object: Any  # The entity data
-    id: Optional[int] = None  # Quick access to entity ID
+
+    message: str
+    object: Any
+
+
+class PaginationInfo(BaseModel):
+    """Pagination information"""
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
 
 
 class MultipleObjectsResponse(BaseModel):
     """Response for list operations with pagination"""
     model_config = ConfigDict(exclude_none=True)
     
-    status: str  # "success" or "error"
-    message: Optional[str] = None
-    objects: List[Any]  # List of entities
-    total: Optional[int] = None  # Total count of all entities
-    page: Optional[int] = None  # Current page number (1-indexed)
-    page_size: Optional[int] = None  # Number of items per page
-    total_pages: Optional[int] = None  # Total number of pages
+    message: str
+    objects: List[Any]
+    pagination: PaginationInfo
+    filters: Optional[dict] = None
+    sorting: Optional[dict] = None
+    special_features: Optional[dict] = None
 
 
 class BulkOperationResponse(BaseModel):
-    """Response for bulk operations (create, update, delete)"""
+    """Base response for bulk operations"""
     model_config = ConfigDict(exclude_none=True)
     
-    status: str  # "success" or "error"
-    message: Optional[str] = None
-    created: Optional[int] = None
-    updated: Optional[int] = None
-    deleted: Optional[int] = None
-    existing: Optional[int] = None
-    processed: Optional[int] = None
-    total: Optional[int] = None
-    requested: Optional[int] = None
-    relations_added: Optional[int] = None
-    relations_updated: Optional[int] = None
-    batches_processed: Optional[int] = None  # Number of batches processed
-    batch_size: Optional[int] = None  # Size of each batch
+    message: str
+    processed: int
+    requested: int
+    batches_processed: int
+    batch_size: int
 
+
+class BulkDeleteResponse(BulkOperationResponse):
+    """Response for bulk delete operations"""
+    deleted: int
+
+
+class BulkCreateResponse(BulkOperationResponse):
+    """Response for bulk create operations"""
+    objects: List[Any]
+    created: int
+    existing: int
+
+class BulkRelationUpdateResponse(BulkOperationResponse):
+    """Response for bulk relation updates"""
+    updated: int
+
+
+class BulkRelationCreateResponse(BulkOperationResponse):
+    """Response for bulk relation creation"""
+    created: int
+    updated: int
+
+class BulkKeywordCreateResponse(BulkCreateResponse):
+    """Response for bulk keyword creation with relations"""
+    relations_created: int
+    relations_updated: int
 
 # ==================== Bulk Keyword Schemas ====================
 
-class BulkKeywordUpdateRelations(BaseModel):
-    """Base schema for bulk updating keyword match types for existing relations"""
-    keyword_ids: List[int]  # List of keyword IDs to update
-    
-    # Match type values to set (if corresponding override flag is True)
-    broad: Optional[bool] = None
-    phrase: Optional[bool] = None
-    exact: Optional[bool] = None
-    neg_broad: Optional[bool] = None
-    neg_phrase: Optional[bool] = None
-    neg_exact: Optional[bool] = None
-    
-    # Override flags: If True, update the corresponding match type
-    # If False or not provided, leave the match type unchanged
-    override_broad: bool = False
-    override_phrase: bool = False
-    override_exact: bool = False
-    override_neg_broad: bool = False
-    override_neg_phrase: bool = False
-    override_neg_exact: bool = False
+class MatchTypeFlagsBase(BaseModel):
+    broad: bool
+    phrase: bool
+    exact: bool
+    neg_broad: bool
+    neg_phrase: bool
+    neg_exact: bool
 
 
-class BulkKeywordCreateRelations(BulkKeywordUpdateRelations):
-    """Schema for creating new relations for existing keywords"""
-    # Match types to apply to new relations
-    match_types: Optional[MatchTypes] = None
-    
-    # Optional: Associate with companies (apply same match_types to all)
-    company_ids: Optional[List[int]] = None
-    
-    # Optional: Associate with ad campaigns (apply same match_types to all)
-    ad_campaign_ids: Optional[List[int]] = None
-    
-    # Optional: Associate with ad groups (apply same match_types to all)
-    ad_group_ids: Optional[List[int]] = None
+class OverrideFlagsBase(BaseModel):
+    """Base schema for override boolean flags"""
+    override_broad: bool
+    override_phrase: bool
+    override_exact: bool
+    override_neg_broad: bool
+    override_neg_phrase: bool
+    override_neg_exact: bool
 
 
-class BulkKeywordCreate(BulkKeywordCreateRelations):
-    """Schema for bulk keyword creation with optional relations"""
-    keywords: List[str]  # List of keyword strings to create
-    
-    # Override keyword_ids from parent - not needed for creation
-    keyword_ids: Optional[List[int]] = None  # Not used in this endpoint
+class KeywordMatchTypesBase(MatchTypeFlagsBase, OverrideFlagsBase):
+    """Combined schema for all keyword match type and override flags"""
+    pass
 
 
-# ==================== Bulk Filter Schemas ====================
-
-class BulkFilterUpdateRelations(BaseModel):
-    """Schema for bulk updating filter is_negative for existing relations"""
-    filter_ids: List[int]  # List of filter IDs to update
-    is_negative: bool  # Value to set for is_negative field
-
-
-class BulkFilterCreateRelations(BaseModel):
-    """Schema for creating new relations for existing filters"""
-    filter_ids: List[int]  # List of filter IDs to associate
-    is_negative: bool = False  # Whether this is a negative filter
-    
-    # Optional: Associate with companies
-    company_ids: Optional[List[int]] = None
-    
-    # Optional: Associate with ad campaigns
-    ad_campaign_ids: Optional[List[int]] = None
-    
-    # Optional: Associate with ad groups
-    ad_group_ids: Optional[List[int]] = None
+class EntityIdsBase(BaseModel):
+    """Base schema for entity ID associations"""
+    company_ids: List[int]
+    ad_campaign_ids: List[int]
+    ad_group_ids: List[int]
 
 
-class BulkFilterCreate(BulkFilterCreateRelations):
-    """Schema for bulk filter creation with optional relations"""
-    filters: List[str]  # List of filter strings to create
-    
-    # Override filter_ids from parent - not needed for creation
-    filter_ids: Optional[List[int]] = None  # Not used in this endpoint
-
-
-# ==================== Delete Schemas ====================
+# ==================== Request Schemas for Bulk Operations ====================
 
 class BulkDeleteRequest(BaseModel):
-    """Request schema for bulk delete operations - simple list of IDs"""
+    """Request schema for bulk delete operations"""
     ids: List[int]
 
+
+class BulkKeywordCreate(KeywordMatchTypesBase, EntityIdsBase):
+    """Request schema for bulk keyword creation with relations"""
+    keywords: List[str]
+
+
+class BulkKeywordUpdateRelations(KeywordMatchTypesBase):
+    """Request schema for bulk updating keyword relations"""
+    keyword_ids: List[int]
+
+
+class BulkKeywordCreateRelations(KeywordMatchTypesBase, EntityIdsBase):
+    """Request schema for bulk creating keyword relations"""
+    keyword_ids: List[int]
