@@ -17,7 +17,7 @@ else
 fi
 
 # Run the demo_data.py script with all arguments
-python "$SCRIPT_DIR/demo_data.py" "$@"
+python3 "$SCRIPT_DIR/demo_data.py" "$@"
 
 # Deactivate virtual environment
 deactivate

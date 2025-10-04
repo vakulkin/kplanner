@@ -9,10 +9,10 @@ This script provides functionality to:
 4. Test performance with various data volumes
 
 Usage:
-    python demo_data.py import --size small|medium|large|huge
-    python demo_data.py cleanup
-    python demo_data.py verify
-    python demo_data.py stats
+    python3 demo_data.py import [small|medium|large|huge]
+    python3 demo_data.py cleanup
+    python3 demo_data.py verify
+    python3 demo_data.py stats
 """
 
 import os
@@ -647,10 +647,11 @@ def main():
     # Import command
     import_parser = subparsers.add_parser("import", help="Import demo data")
     import_parser.add_argument(
-        "--size",
+        "size",
         choices=["small", "medium", "large", "huge"],
+        nargs="?",
         default="medium",
-        help="Size of demo data to import"
+        help="Size of demo data to import (default: medium)"
     )
 
     # Cleanup command

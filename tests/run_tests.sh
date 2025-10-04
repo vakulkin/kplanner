@@ -54,13 +54,16 @@ echo -e "${BLUE}   Running pytest test suite${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
+# Change to project directory to ensure correct module resolution
+cd "$PROJECT_DIR"
+
 # Run pytest with various options
 # -v: verbose
 # -s: show print statements
 # --tb=short: shorter traceback format
 # --cov: coverage report (if pytest-cov is installed)
 
-$PYTEST test_api.py -v --tb=short
+$PYTEST tests/test_api.py -v --tb=short
 
 # Show test summary
 echo ""
@@ -75,7 +78,7 @@ read -p "$(echo -e ${YELLOW}Generate coverage report? \(y/n\): ${NC})" run_cover
 if [ "$run_coverage" = "y" ] || [ "$run_coverage" = "Y" ]; then
     echo ""
     echo -e "${BLUE}Generating coverage report...${NC}"
-    $PYTEST test_api.py --cov="$PROJECT_DIR" --cov-report=html --cov-report=term
+    $PYTEST tests/test_api.py --cov="$PROJECT_DIR" --cov-report=html --cov-report=term
     echo ""
     echo -e "${GREEN}Coverage report generated in htmlcov/index.html${NC}"
 fi
