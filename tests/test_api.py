@@ -16,7 +16,7 @@ import asyncio
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from main import app
-from database import Base, get_db
+from src.core.database import Base, get_db
 
 
 # Initialize faker for random data generation
@@ -76,8 +76,9 @@ def client(db_session):
     os.environ["TESTING"] = "true"
     os.environ["DEV_MODE"] = "true"
 
-    with TestClient(app) as test_client:
-        yield test_client
+    test_client = TestClient(app)
+    yield test_client
+    test_client.close()
 
     # Clean up
     app.dependency_overrides.clear()

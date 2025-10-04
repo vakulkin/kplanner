@@ -1,12 +1,13 @@
 from sqlalchemy import Column, Integer, String, Boolean, TIMESTAMP, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from database import Base
+from ..core.database import Base
+
 
 class Company(Base):
     __tablename__ = "companies"
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
     clerk_user_id = Column(String(255), nullable=False, index=True)
     is_active = Column(Boolean, default=True, nullable=False)
@@ -20,7 +21,7 @@ class Company(Base):
 class AdCampaign(Base):
     __tablename__ = "ad_campaigns"
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
     clerk_user_id = Column(String(255), nullable=False, index=True)
     is_active = Column(Boolean, default=True, nullable=False)
@@ -36,7 +37,7 @@ class AdCampaign(Base):
 class AdGroup(Base):
     __tablename__ = "ad_groups"
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
     clerk_user_id = Column(String(255), nullable=False, index=True)
     is_active = Column(Boolean, default=True, nullable=False)
@@ -55,7 +56,7 @@ class Keyword(Base):
         Index('idx_clerk_user_id', 'clerk_user_id'),
     )
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     keyword = Column(String(255), nullable=False)
     clerk_user_id = Column(String(255), nullable=False)
     created = Column(TIMESTAMP, server_default=func.current_timestamp())
@@ -73,7 +74,7 @@ class AdGroupKeyword(Base):
         Index('idx_ad_group_keyword_clerk_user_id', 'clerk_user_id'),
     )
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     ad_group_id = Column(Integer, ForeignKey("ad_groups.id", ondelete="CASCADE"), nullable=False)
     keyword_id = Column(Integer, ForeignKey("keywords.id", ondelete="CASCADE"), nullable=False)
     clerk_user_id = Column(String(255), nullable=False)
@@ -91,7 +92,7 @@ class CompanyKeyword(Base):
         Index('idx_company_keyword_clerk_user_id', 'clerk_user_id'),
     )
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
     keyword_id = Column(Integer, ForeignKey("keywords.id", ondelete="CASCADE"), nullable=False)
     clerk_user_id = Column(String(255), nullable=False)
@@ -109,7 +110,7 @@ class AdCampaignKeyword(Base):
         Index('idx_ad_campaign_keyword_clerk_user_id', 'clerk_user_id'),
     )
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     ad_campaign_id = Column(Integer, ForeignKey("ad_campaigns.id", ondelete="CASCADE"), nullable=False)
     keyword_id = Column(Integer, ForeignKey("keywords.id", ondelete="CASCADE"), nullable=False)
     clerk_user_id = Column(String(255), nullable=False)

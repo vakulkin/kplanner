@@ -61,9 +61,9 @@ cd "$PROJECT_DIR"
 # -v: verbose
 # -s: show print statements
 # --tb=short: shorter traceback format
-# --cov: coverage report (if pytest-cov is installed)
+# Coverage options are now in pytest.ini
 
-$PYTEST tests/test_api.py -v --tb=short
+$PYTEST tests/test_api.py
 
 # Show test summary
 echo ""
@@ -72,15 +72,15 @@ echo -e "${BLUE}   Test Suite Complete!${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
-# Optional: Run with coverage
+# Optional: Run with coverage (now configured in pytest.ini)
 read -p "$(echo -e ${YELLOW}Generate coverage report? \(y/n\): ${NC})" run_coverage
 
 if [ "$run_coverage" = "y" ] || [ "$run_coverage" = "Y" ]; then
     echo ""
     echo -e "${BLUE}Generating coverage report...${NC}"
-    $PYTEST tests/test_api.py --cov="$PROJECT_DIR" --cov-report=html --cov-report=term
+    $PYTEST tests/test_api.py --cov-report=html:tests/htmlcov --cov-report=term
     echo ""
-    echo -e "${GREEN}Coverage report generated in htmlcov/index.html${NC}"
+    echo -e "${GREEN}Coverage report generated in tests/htmlcov/index.html${NC}"
 fi
 
 echo ""

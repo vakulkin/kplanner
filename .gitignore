@@ -1,0 +1,65 @@
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables (contains sensitive data like API keys)
+.env
+.env.local
+.env.production
+
+# macOS system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Testing artifacts
+.pytest_cache/
+.hypothesis/
+.coverage
+tests/htmlcov/
+*.log
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Database files (if using local SQLite)
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and temporary files
+logs/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Build and distribution (if applicable)
+build/
+dist/
+*.egg-info/
+*.whl
+
+# Node.js (if any frontend, though not present)
+node_modules/
+npm-debug.log*
+
+# FastAPI/Uvicorn specific
+*.pid
+reload.log
+
+# Miscellaneous
+.cache/

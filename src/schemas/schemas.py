@@ -95,7 +95,6 @@ class MultipleObjectsResponse(BaseModel):
     pagination: PaginationInfo
     filters: Optional[dict] = None
     sorting: Optional[dict] = None
-    special_features: Optional[dict] = None
 
 
 class BulkOperationResponse(BaseModel):
