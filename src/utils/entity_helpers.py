@@ -421,16 +421,3 @@ def handle_update_entity(entity_id: int, entity_update, db: Session, user_id: st
         parent_model=config.get("parent_model"),
         parent_name=config.get("parent_name")
     )
-
-
-def handle_toggle_entity(entity_id: int, db: Session, user_id: str, config: dict):
-    """Generic handler for toggling entity active status."""
-    return toggle_entity_active(
-        db=db,
-        entity_id=entity_id,
-        user_id=user_id,
-        model_class=config["model_class"],
-        schema_class=config["schema_class"],
-        entity_name=config["entity_name"],
-        active_limit=config["active_limit"]
-    )

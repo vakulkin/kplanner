@@ -11,11 +11,8 @@ from src.core.settings import (
     PAGE_SIZE,
 )
 from src.models.models import (
-    AdCampaign,
     AdCampaignKeyword,
-    AdGroup,
     AdGroupKeyword,
-    Company,
     CompanyKeyword,
     Keyword,
 )

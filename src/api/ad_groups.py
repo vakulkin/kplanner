@@ -24,7 +24,6 @@ from src.utils.entity_helpers import (
     handle_create_entity,
     handle_get_entity,
     handle_list_entities,
-    handle_toggle_entity,
     handle_update_entity,
 )
 from src.utils.metadata_helpers import get_ad_groups_metadata
