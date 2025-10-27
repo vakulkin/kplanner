@@ -5,14 +5,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.ad_groups import router as ad_groups_router
 from src.api.campaigns import router as campaigns_router
+from src.api.column_mappings import router as column_mappings_router
 from src.api.companies import router as companies_router
 from src.api.keywords import router as keywords_router
 from src.core.database import Base, engine
 from src.core.settings import DEMO_USER_ID, DEV_MODE, TITLE, VERSION
+from src.models.models import ensure_relation_triggers_exist
 
 # Create tables (skip if in testing mode)
 if not os.getenv("TESTING"):
     Base.metadata.create_all(bind=engine)
+    # Ensure database triggers exist on every server start
+    ensure_relation_triggers_exist(engine)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -35,6 +39,7 @@ app.include_router(companies_router)
 app.include_router(campaigns_router)
 app.include_router(ad_groups_router)
 app.include_router(keywords_router)
+app.include_router(column_mappings_router)
 
 @app.get("/")
 async def root():

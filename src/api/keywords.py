@@ -6,9 +6,7 @@ from sqlalchemy.orm import Session
 
 from src.core.database import get_db
 from src.core.settings import (
-    BATCH_SIZE,
     DEFAULT_PAGE,
-    MAX_KEYWORDS_PER_REQUEST,
     MAX_PAGE_SIZE,
     PAGE_SIZE,
 )
@@ -27,22 +25,20 @@ from src.schemas.schemas import (
     BulkKeywordCreate,
     BulkKeywordCreateRelations,
     BulkKeywordCreateResponse,
-    BulkKeywordUpdateRelations,
     BulkRelationCreateResponse,
-    BulkRelationUpdateResponse,
+    BulkTrashRequest,
+    CompanyKeywordRelation,
+    AdCampaignKeywordRelation,
+    AdGroupKeywordRelation,
     Keyword as KeywordSchema,
     KeywordCreate,
     MultipleObjectsResponse,
     SingleObjectResponse,
 )
-from src.utils.helpers import (
-    bulk_delete_with_batches,
-    get_entity_by_id,
-    get_keywords_metadata,
-    update_simple_entity,
-    paginate_query,
-    process_in_batches,
-)
+from src.utils.bulk_helpers import bulk_delete_with_batches, process_in_batches
+from src.utils.database_helpers import paginate_query
+from src.utils.entity_helpers import get_entity_by_id, update_simple_entity
+from src.utils.metadata_helpers import get_keywords_metadata
 from src.utils.auth import get_current_user_id
 
 router = APIRouter()
@@ -74,46 +70,47 @@ def _get_active_entity_ids(db: Session, user_id: str) -> tuple[list[int], list[i
     )
 
 
-def _create_match_type_condition(user_id: str, match_field: str):
-    """Create an EXISTS condition for a match type across all three relation tables."""
+def _create_match_type_condition(user_id: str, match_field: str, match_value: bool):
+    """Create an EXISTS condition for a match type across all three relation tables.
+    match_value: True = positive match, False = negative match"""
     from sqlalchemy import or_, exists
 
     return or_(
         exists().where(
             CompanyKeyword.keyword_id == Keyword.id,
             CompanyKeyword.clerk_user_id == user_id,
-            getattr(CompanyKeyword, match_field) == True
+            getattr(CompanyKeyword, match_field) == match_value
         ),
         exists().where(
             AdCampaignKeyword.keyword_id == Keyword.id,
             AdCampaignKeyword.clerk_user_id == user_id,
-            getattr(AdCampaignKeyword, match_field) == True
+            getattr(AdCampaignKeyword, match_field) == match_value
         ),
         exists().where(
             AdGroupKeyword.keyword_id == Keyword.id,
             AdGroupKeyword.clerk_user_id == user_id,
-            getattr(AdGroupKeyword, match_field) == True
+            getattr(AdGroupKeyword, match_field) == match_value
         )
     )
 
 
-def _create_match_type_sort_expr(user_id: str, match_field: str):
-    """Create a CASE expression for sorting by match type presence (returns 1 if present, 0 if not)."""
+def _create_match_type_sort_expr(user_id: str, match_field: str, match_value: bool = True):
+    """Create a CASE expression for sorting by match type presence (returns 1 if present, 0 if not).
+    match_value: True = positive match, False = negative match"""
     from sqlalchemy import case
 
-    condition = _create_match_type_condition(user_id, match_field)
+    condition = _create_match_type_condition(user_id, match_field, match_value)
     return case((condition, 1), else_=0)
 
 
 def _format_match_types(relation) -> dict:
-    """Format match types from a relation object into a dictionary."""
+    """Format match types from a relation object into a dictionary.
+    None = not set, True = positive match, False = negative match"""
     return {
         "broad": relation.broad,
         "phrase": relation.phrase,
         "exact": relation.exact,
-        "neg_broad": relation.neg_broad,
-        "neg_phrase": relation.neg_phrase,
-        "neg_exact": relation.neg_exact
+        "pause": relation.pause
     }
 
 
@@ -174,6 +171,7 @@ def _build_matrix_keyword_data(
     keyword_data = {
         "id": keyword.id,
         "keyword": keyword.keyword,
+        "trash": keyword.trash,
         "created": keyword.created,
         "updated": keyword.updated,
         "relations": {
@@ -204,152 +202,159 @@ def _build_matrix_keyword_data(
     return keyword_data
 
 
-def _update_relation_match_types(assoc, update_data: BulkKeywordUpdateRelations) -> bool:
-    updated = False
-
-    if update_data.override_broad and update_data.broad is not None:
-        assoc.broad = update_data.broad
-        updated = True
-    if update_data.override_phrase and update_data.phrase is not None:
-        assoc.phrase = update_data.phrase
-        updated = True
-    if update_data.override_exact and update_data.exact is not None:
-        assoc.exact = update_data.exact
-        updated = True
-    if update_data.override_neg_broad and update_data.neg_broad is not None:
-        assoc.neg_broad = update_data.neg_broad
-        updated = True
-    if update_data.override_neg_phrase and update_data.neg_phrase is not None:
-        assoc.neg_phrase = update_data.neg_phrase
-        updated = True
-    if update_data.override_neg_exact and update_data.neg_exact is not None:
-        assoc.neg_exact = update_data.neg_exact
-        updated = True
-
-    return updated
-
-
 def _create_keyword_relations(
     db: Session,
     keyword,
     company_ids: list[int],
     ad_campaign_ids: list[int],
     ad_group_ids: list[int],
-    broad: bool,
-    phrase: bool,
-    exact: bool,
-    neg_broad: bool,
-    neg_phrase: bool,
-    neg_exact: bool,
-    override_broad: bool,
-    override_phrase: bool,
-    override_exact: bool,
-    override_neg_broad: bool,
-    override_neg_phrase: bool,
-    override_neg_exact: bool
-) -> tuple[int, int]:
-
-    # Match types are now always provided with defaults
+    broad: Optional[bool],
+    phrase: Optional[bool],
+    exact: Optional[bool],
+    pause: Optional[int],
+    override_broad: Optional[bool],
+    override_phrase: Optional[bool],
+    override_exact: Optional[bool],
+    override_pause: Optional[bool]
+) -> tuple[int, int, int, list]:
+    """
+    Create/update/delete keyword relations.
+    Match types: None = not set, True = positive match, False = negative match
+    Pause: None = not paused, 1 = paused
+    A relation is deleted if all match types AND pause become None
+    """
 
     def _process_entity_relations(
         entity_ids: list[int],
         model_class,
         entity_id_field: str
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int, list]:
         added = 0
         updated = 0
+        deleted = 0
+        relations = []
 
         for entity_id in entity_ids:
             # Query for existing relation
             filter_kwargs = {
                 entity_id_field: entity_id,
-                'keyword_id': keyword.id
+                'keyword_id': keyword.id,
+                'clerk_user_id': keyword.clerk_user_id
             }
             existing = db.query(model_class).filter_by(**filter_kwargs).first()
 
             if existing:
-                # Update existing relation if any override flag is True
+                # Update existing relation - allow setting values if override=true OR the field is currently null
                 relation_updated = False
-                if override_broad:
+                if (override_broad is True or existing.broad is None) and existing.broad != broad:
                     existing.broad = broad
                     relation_updated = True
-                if override_phrase:
+                    
+                if (override_phrase is True or existing.phrase is None) and existing.phrase != phrase:
                     existing.phrase = phrase
                     relation_updated = True
-                if override_exact:
+                    
+                if (override_exact is True or existing.exact is None) and existing.exact != exact:
                     existing.exact = exact
                     relation_updated = True
-                if override_neg_broad:
-                    existing.neg_broad = neg_broad
-                    relation_updated = True
-                if override_neg_phrase:
-                    existing.neg_phrase = neg_phrase
-                    relation_updated = True
-                if override_neg_exact:
-                    existing.neg_exact = neg_exact
+
+                if (override_pause is True or existing.pause is None) and existing.pause != pause:
+                    existing.pause = pause
                     relation_updated = True
 
                 if relation_updated:
-                    updated += 1
+                    # Check if all match types are None after update
+                    if existing.broad is None and existing.phrase is None and existing.exact is None and existing.pause is None:
+                        # Delete the relation since all match types are None
+                        db.delete(existing)
+                        deleted += 1
+                        # Return the deleted relation info to frontend with None values
+                        class DeletedRelation:
+                            def __init__(self, original):
+                                # Copy all attributes from the original relation
+                                for attr in dir(original):
+                                    if not attr.startswith('_') and not callable(getattr(original, attr)):
+                                        try:
+                                            setattr(self, attr, getattr(original, attr))
+                                        except:
+                                            pass
+                                # Set all match types to None to indicate deletion
+                                self.broad = None
+                                self.phrase = None
+                                self.exact = None
+                                self.pause = None
+                        
+                        deleted_relation = DeletedRelation(existing)
+                        relations.append(deleted_relation)
+                    else:
+                        updated += 1
+                        relations.append(existing)
             else:
-                # Create new relation
-                create_kwargs = {
-                    entity_id_field: entity_id,
-                    'keyword_id': keyword.id,
-                    'clerk_user_id': keyword.clerk_user_id,
-                    'broad': broad,
-                    'phrase': phrase,
-                    'exact': exact,
-                    'neg_broad': neg_broad,
-                    'neg_phrase': neg_phrase,
-                    'neg_exact': neg_exact
-                }
-                new_relation = model_class(**create_kwargs)
-                db.add(new_relation)
-                added += 1
+                # Only create new relation if at least one match type or pause is not None
+                if broad is not None or phrase is not None or exact is not None or pause is not None:
+                    create_kwargs = {
+                        entity_id_field: entity_id,
+                        'keyword_id': keyword.id,
+                        'clerk_user_id': keyword.clerk_user_id,
+                        'broad': broad,
+                        'phrase': phrase,
+                        'exact': exact,
+                        'pause': pause
+                    }
+                    new_relation = model_class(**create_kwargs)
+                    db.add(new_relation)
+                    added += 1
+                    relations.append(new_relation)
 
-        return added, updated
+        return added, updated, deleted, relations
 
     relations_created = 0
     relations_updated = 0
+    relations_deleted = 0
+    all_relations = []
 
     # Handle company relations
     if company_ids:
-        added, updated = _process_entity_relations(
+        added, updated, deleted, relations = _process_entity_relations(
             company_ids,
             CompanyKeyword,
             'company_id'
         )
         relations_created += added
         relations_updated += updated
+        relations_deleted += deleted
+        all_relations.extend(relations)
 
     # Handle campaign relations
     if ad_campaign_ids:
-        added, updated = _process_entity_relations(
+        added, updated, deleted, relations = _process_entity_relations(
             ad_campaign_ids,
             AdCampaignKeyword,
             'ad_campaign_id'
         )
         relations_created += added
         relations_updated += updated
+        relations_deleted += deleted
+        all_relations.extend(relations)
 
     # Handle ad group relations
     if ad_group_ids:
-        added, updated = _process_entity_relations(
+        added, updated, deleted, relations = _process_entity_relations(
             ad_group_ids,
             AdGroupKeyword,
             'ad_group_id'
         )
         relations_created += added
         relations_updated += updated
+        relations_deleted += deleted
+        all_relations.extend(relations)
 
-    return relations_created, relations_updated
+    return relations_created, relations_updated, relations_deleted, all_relations
 
 
 @router.post("/keywords/bulk", response_model=BulkKeywordCreateResponse, status_code=201)
 async def create_bulk_keywords(
     bulk_data: BulkKeywordCreate,
-    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
@@ -360,7 +365,7 @@ async def create_bulk_keywords(
     batches_processed = 0
 
     # Process keywords in batches
-    for keyword_batch in process_in_batches(bulk_data.keywords, batch_size=batch_size):
+    for keyword_batch in process_in_batches(bulk_data.keywords):
         batch_created = []
         batch_existing = []
         batch_relations_created = 0
@@ -389,7 +394,7 @@ async def create_bulk_keywords(
                 batch_created.append(keyword)
 
             # Create relations using helper function
-            added, updated = _create_keyword_relations(
+            added, updated, deleted, _ = _create_keyword_relations(
                 db=db,
                 keyword=keyword,
                 company_ids=bulk_data.company_ids,
@@ -398,15 +403,11 @@ async def create_bulk_keywords(
                 broad=bulk_data.broad,
                 phrase=bulk_data.phrase,
                 exact=bulk_data.exact,
-                neg_broad=bulk_data.neg_broad,
-                neg_phrase=bulk_data.neg_phrase,
-                neg_exact=bulk_data.neg_exact,
+                pause=bulk_data.pause,
                 override_broad=bulk_data.override_broad,
                 override_phrase=bulk_data.override_phrase,
                 override_exact=bulk_data.override_exact,
-                override_neg_broad=bulk_data.override_neg_broad,
-                override_neg_phrase=bulk_data.override_neg_phrase,
-                override_neg_exact=bulk_data.override_neg_exact
+                override_pause=bulk_data.override_pause
             )
             batch_relations_created += added
             batch_relations_updated += updated
@@ -424,149 +425,132 @@ async def create_bulk_keywords(
 
     return BulkKeywordCreateResponse(
         message=f"Created {len(created_keywords)} new keywords, found {len(existing_keywords)} existing",
-        objects=[KeywordSchema.from_orm(k) for k in all_keywords],
+        objects=[KeywordSchema.model_validate(k) for k in all_keywords],
         created=len(created_keywords),
         existing=len(existing_keywords),
         processed=len(all_keywords),
         requested=len(bulk_data.keywords),
         relations_created=total_relations_created,
         relations_updated=total_relations_updated,
-        batches_processed=batches_processed,
-        batch_size=batch_size
     )
 
 
-@router.post("/keywords/bulk/relations/update", response_model=BulkRelationUpdateResponse)
-async def bulk_update_keyword_relations(
-    update_data: BulkKeywordUpdateRelations,
-    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    # Limit to MAX_KEYWORDS_PER_REQUEST keywords per request
-    if len(update_data.keyword_ids) > MAX_KEYWORDS_PER_REQUEST:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Maximum {MAX_KEYWORDS_PER_REQUEST} keywords allowed per request"
-        )
+def _delete_keyword_relations(
+    db: Session,
+    keyword,
+    company_ids: list[int],
+    ad_campaign_ids: list[int],
+    ad_group_ids: list[int],
+    user_id: str
+) -> int:
+    """Delete keyword relations for specified entities."""
+    deleted_count = 0
 
-    # Get keywords that belong to user
-    keywords = db.query(Keyword).filter(
-        Keyword.id.in_(update_data.keyword_ids),
-        Keyword.clerk_user_id == user_id
-    ).all()
+    # Delete company relations
+    if company_ids:
+        deleted = db.query(CompanyKeyword).filter(
+            CompanyKeyword.keyword_id == keyword.id,
+            CompanyKeyword.company_id.in_(company_ids),
+            CompanyKeyword.clerk_user_id == user_id
+        ).delete()
+        deleted_count += deleted
 
-    relations_updated = 0
-    batches_processed = 0
+    # Delete campaign relations
+    if ad_campaign_ids:
+        deleted = db.query(AdCampaignKeyword).filter(
+            AdCampaignKeyword.keyword_id == keyword.id,
+            AdCampaignKeyword.ad_campaign_id.in_(ad_campaign_ids),
+            AdCampaignKeyword.clerk_user_id == user_id
+        ).delete()
+        deleted_count += deleted
 
-    # Process keywords in batches of DEFAULT_BATCH_SIZE
-    for keyword_batch in process_in_batches(keywords, batch_size=batch_size):
-        # Process each keyword in the batch
-        for keyword in keyword_batch:
-            # Update company relations (with ownership check)
-            company_relations = db.query(CompanyKeyword).filter(
-                CompanyKeyword.keyword_id == keyword.id,
-                CompanyKeyword.clerk_user_id == user_id
-            ).all()
+    # Delete ad group relations
+    if ad_group_ids:
+        deleted = db.query(AdGroupKeyword).filter(
+            AdGroupKeyword.keyword_id == keyword.id,
+            AdGroupKeyword.ad_group_id.in_(ad_group_ids),
+            AdGroupKeyword.clerk_user_id == user_id
+        ).delete()
+        deleted_count += deleted
 
-            for assoc in company_relations:
-                if _update_relation_match_types(assoc, update_data):
-                    relations_updated += 1
-
-            # Update campaign relations (with ownership check)
-            campaign_relations = db.query(AdCampaignKeyword).filter(
-                AdCampaignKeyword.keyword_id == keyword.id,
-                AdCampaignKeyword.clerk_user_id == user_id
-            ).all()
-
-            for assoc in campaign_relations:
-                if _update_relation_match_types(assoc, update_data):
-                    relations_updated += 1
-
-            # Update ad group relations (with ownership check)
-            ad_group_relations = db.query(AdGroupKeyword).filter(
-                AdGroupKeyword.keyword_id == keyword.id,
-                AdGroupKeyword.clerk_user_id == user_id
-            ).all()
-
-            for assoc in ad_group_relations:
-                if _update_relation_match_types(assoc, update_data):
-                    relations_updated += 1
-
-        # Commit after each batch
-        db.commit()
-        batches_processed += 1
-
-    return BulkRelationUpdateResponse(
-        message=f"Updated {relations_updated} relations for {len(keywords)} keywords",
-        processed=len(keywords),
-        requested=len(update_data.keyword_ids),
-        updated=relations_updated,
-        batches_processed=batches_processed,
-        batch_size=batch_size
-    )
+    return deleted_count
 
 
 @router.post("/keywords/bulk/relations", response_model=BulkRelationCreateResponse)
-async def bulk_create_keyword_relations(
-    create_data: BulkKeywordCreateRelations,
-    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
+async def bulk_upsert_keyword_relations(
+    upsert_data: BulkKeywordCreateRelations,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     # Get keywords that belong to user
     keywords = db.query(Keyword).filter(
-        Keyword.id.in_(create_data.keyword_ids),
+        Keyword.id.in_(upsert_data.keyword_ids),
         Keyword.clerk_user_id == user_id
     ).all()
 
     total_relations_created = 0
     total_relations_updated = 0
+    total_relations_deleted = 0
+    all_relations = []
     batches_processed = 0
 
     # Process keywords in batches
-    for keyword_batch in process_in_batches(keywords, batch_size=batch_size):
+    for keyword_batch in process_in_batches(keywords):
         batch_relations_created = 0
         batch_relations_updated = 0
+        batch_relations_deleted = 0
+        batch_relations = []
 
         # Process each keyword in the batch
         for keyword in keyword_batch:
-            added, updated = _create_keyword_relations(
+            # Use the values directly - they can be None, True, or False
+            added, updated, deleted, relations = _create_keyword_relations(
                 db=db,
                 keyword=keyword,
-                company_ids=create_data.company_ids,
-                ad_campaign_ids=create_data.ad_campaign_ids,
-                ad_group_ids=create_data.ad_group_ids,
-                broad=create_data.broad,
-                phrase=create_data.phrase,
-                exact=create_data.exact,
-                neg_broad=create_data.neg_broad,
-                neg_phrase=create_data.neg_phrase,
-                neg_exact=create_data.neg_exact,
-                override_broad=create_data.override_broad,
-                override_phrase=create_data.override_phrase,
-                override_exact=create_data.override_exact,
-                override_neg_broad=create_data.override_neg_broad,
-                override_neg_phrase=create_data.override_neg_phrase,
-                override_neg_exact=create_data.override_neg_exact
+                company_ids=upsert_data.company_ids,
+                ad_campaign_ids=upsert_data.ad_campaign_ids,
+                ad_group_ids=upsert_data.ad_group_ids,
+                broad=upsert_data.broad,
+                phrase=upsert_data.phrase,
+                exact=upsert_data.exact,
+                pause=upsert_data.pause,
+                override_broad=upsert_data.override_broad,
+                override_phrase=upsert_data.override_phrase,
+                override_exact=upsert_data.override_exact,
+                override_pause=upsert_data.override_pause
             )
             batch_relations_created += added
             batch_relations_updated += updated
+            batch_relations_deleted += deleted
+            batch_relations.extend(relations)
 
+        # Flush to get IDs before committing
+        db.flush()
+        
+        # Convert batch relations to response schemas before commit (only for create/update, not delete)
+        for r in batch_relations:
+            if hasattr(r, 'company_id'):
+                all_relations.append(CompanyKeywordRelation.model_validate(r))
+            elif hasattr(r, 'ad_campaign_id'):
+                all_relations.append(AdCampaignKeywordRelation.model_validate(r))
+            elif hasattr(r, 'ad_group_id'):
+                all_relations.append(AdGroupKeywordRelation.model_validate(r))
+        
         # Commit after each batch
         db.commit()
         total_relations_created += batch_relations_created
         total_relations_updated += batch_relations_updated
+        total_relations_deleted += batch_relations_deleted
         batches_processed += 1
 
     return BulkRelationCreateResponse(
         message=f"Processed {len(keywords)} keywords",
         processed=len(keywords),
-        requested=len(create_data.keyword_ids),
+        requested=len(upsert_data.keyword_ids),
         created=total_relations_created,
         updated=total_relations_updated,
-        batches_processed=batches_processed,
-        batch_size=batch_size
+        deleted=total_relations_deleted,
+        relations=all_relations,
     )
 
 
@@ -580,13 +564,11 @@ async def list_keywords(
     created_before: Optional[datetime] = Query(None, description="Filter by created date (before)"),
     updated_after: Optional[datetime] = Query(None, description="Filter by updated date (after)"),
     updated_before: Optional[datetime] = Query(None, description="Filter by updated date (before)"),
-    has_broad: Optional[bool] = Query(None, description="Filter keywords with at least one broad match relation"),
-    has_phrase: Optional[bool] = Query(None, description="Filter keywords with at least one phrase match relation"),
-    has_exact: Optional[bool] = Query(None, description="Filter keywords with at least one exact match relation"),
-    has_neg_broad: Optional[bool] = Query(None, description="Filter keywords with at least one negative broad match relation"),
-    has_neg_phrase: Optional[bool] = Query(None, description="Filter keywords with at least one negative phrase match relation"),
-    has_neg_exact: Optional[bool] = Query(None, description="Filter keywords with at least one negative exact match relation"),
-    sort_by: Optional[str] = Query("created", description="Primary sort field: id, keyword, created, updated, has_broad, has_phrase, has_exact, has_neg_broad, has_neg_phrase, has_neg_exact"),
+    has_broad: Optional[bool] = Query(None, description="Filter keywords with at least one broad match relation (True=positive, False=negative)"),
+    has_phrase: Optional[bool] = Query(None, description="Filter keywords with at least one phrase match relation (True=positive, False=negative)"),
+    has_exact: Optional[bool] = Query(None, description="Filter keywords with at least one exact match relation (True=positive, False=negative)"),
+    trash: Optional[bool] = Query(None, description="Filter by trash status (True=trashed, False=not trashed, None=all)"),
+    sort_by: Optional[str] = Query("created", description="Primary sort field: id, keyword, created, updated, has_broad, has_phrase, has_exact, trash"),
     sort_order: Optional[str] = Query("desc", description="Primary sort order: asc or desc"),
     sort_by_2: Optional[str] = Query(None, description="Secondary sort field (same options as sort_by)"),
     sort_order_2: Optional[str] = Query(None, description="Secondary sort order: asc or desc"),
@@ -618,56 +600,32 @@ async def list_keywords(
         query = query.filter(Keyword.updated <= updated_before)
 
     # Add match type filters using helper function
+    # Now: has_broad=True means positive broad, has_broad=False means negative broad
     match_type_params = {
         'broad': has_broad,
         'phrase': has_phrase,
-        'exact': has_exact,
-        'neg_broad': has_neg_broad,
-        'neg_phrase': has_neg_phrase,
-        'neg_exact': has_neg_exact
+        'exact': has_exact
     }
 
     match_type_filters = []
     for match_field, has_match in match_type_params.items():
         if has_match is not None:
-            condition = _create_match_type_condition(user_id, match_field)
-            match_type_filters.append(condition if has_match else ~condition)
+            # has_match True/False now directly maps to positive/negative match
+            condition = _create_match_type_condition(user_id, match_field, has_match)
+            match_type_filters.append(condition)
 
     # Apply match type filters (AND condition - all must be satisfied)
     if match_type_filters:
         query = query.filter(and_(*match_type_filters))
 
-    # Filter keywords that have relations with active entities (OR condition)
-    # Use EXISTS subqueries for optimal performance
-    # Only apply if there are active entities to filter by
-    if company_id_list or campaign_id_list or adgroup_id_list:
-        filters = []
-
-        if company_id_list:
-            filters.append(
-                exists().where(
-                    CompanyKeyword.keyword_id == Keyword.id,
-                    CompanyKeyword.company_id.in_(company_id_list)
-                )
-            )
-
-        if campaign_id_list:
-            filters.append(
-                exists().where(
-                    AdCampaignKeyword.keyword_id == Keyword.id,
-                    AdCampaignKeyword.ad_campaign_id.in_(campaign_id_list)
-                )
-            )
-
-        if adgroup_id_list:
-            filters.append(
-                exists().where(
-                    AdGroupKeyword.keyword_id == Keyword.id,
-                    AdGroupKeyword.ad_group_id.in_(adgroup_id_list)
-                )
-            )
-
-        query = query.filter(or_(*filters))
+    # Add trash filter
+    if trash is not None:
+        if trash:
+            # Only trashed keywords (trash = True)
+            query = query.filter(Keyword.trash == True)
+        else:
+            # Only not trashed keywords (trash IS NULL OR trash = False)
+            query = query.filter((Keyword.trash == False) | (Keyword.trash.is_(None)))
 
     # If only_attached is True, add filter for keywords with at least one relation
     if only_attached:
@@ -699,24 +657,22 @@ async def list_keywords(
             "id": Keyword.id,
             "keyword": Keyword.keyword,
             "created": Keyword.created,
-            "updated": Keyword.updated
+            "updated": Keyword.updated,
+            "trash": Keyword.trash
         }
 
         if field_name in simple_fields:
             return simple_fields[field_name]
 
-        # Match type fields - use helper function
+        # Match type fields - use helper function (sorting by positive matches by default)
         match_type_map = {
             "has_broad": "broad",
             "has_phrase": "phrase",
-            "has_exact": "exact",
-            "has_neg_broad": "neg_broad",
-            "has_neg_phrase": "neg_phrase",
-            "has_neg_exact": "neg_exact"
+            "has_exact": "exact"
         }
 
         if field_name in match_type_map:
-            return _create_match_type_sort_expr(user_id, match_type_map[field_name])
+            return _create_match_type_sort_expr(user_id, match_type_map[field_name], True)
 
         return None
 
@@ -804,6 +760,10 @@ async def update_keyword(
     user_id: str = Depends(get_current_user_id)
 ):
     """Update a keyword"""
+    update_fields = {"keyword": keyword_update.keyword}
+    if keyword_update.trash is not None:
+        update_fields["trash"] = keyword_update.trash
+    
     return update_simple_entity(
         db=db,
         user_id=user_id,
@@ -811,14 +771,42 @@ async def update_keyword(
         model_class=Keyword,
         schema_class=KeywordSchema,
         entity_name="keyword",
-        update_fields={"keyword": keyword_update.keyword}
+        update_fields=update_fields
+    )
+
+
+@router.post("/keywords/bulk/trash", response_model=BulkDeleteResponse)
+async def bulk_trash_keywords(
+    trash_data: BulkTrashRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    """Bulk trash/untrash keywords"""
+    # Get keywords that belong to user
+    keywords = db.query(Keyword).filter(
+        Keyword.id.in_(trash_data.ids),
+        Keyword.clerk_user_id == user_id
+    ).all()
+
+    updated_count = 0
+    for keyword in keywords:
+        keyword.trash = trash_data.trash
+        updated_count += 1
+
+    db.commit()
+
+    action = "trashed" if trash_data.trash else "untrashed"
+    return BulkDeleteResponse(
+        message=f"Successfully {action} {updated_count} keywords",
+        processed=len(keywords),
+        requested=len(trash_data.ids),
+        deleted=updated_count,  # Using deleted field for consistency with other bulk responses
     )
 
 
 @router.post("/keywords/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_keywords(
     delete_data: BulkDeleteRequest,
-    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
@@ -830,62 +818,4 @@ async def bulk_delete_keywords(
         model_class=Keyword,
         ownership_field="clerk_user_id",
         message_template="Deleted {0} keywords",
-        batch_size=batch_size
-    )
-
-
-@router.post("/relations/ad_company_keyword/bulk/delete", response_model=BulkDeleteResponse)
-async def bulk_delete_company_keyword_relations(
-    delete_data: BulkDeleteRequest,
-    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Bulk delete ad_company_keyword relations"""
-    return bulk_delete_with_batches(
-        db=db,
-        user_id=user_id,
-        ids=delete_data.ids,
-        model_class=CompanyKeyword,
-        ownership_field="clerk_user_id",
-        message_template="Deleted {0} ad_company_keyword relations",
-        batch_size=batch_size
-    )
-
-
-@router.post("/relations/ad_campaign_keyword/bulk/delete", response_model=BulkDeleteResponse)
-async def bulk_delete_campaign_keyword_relations(
-    delete_data: BulkDeleteRequest,
-    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Bulk delete ad_campaign_keyword relations"""
-    return bulk_delete_with_batches(
-        db=db,
-        user_id=user_id,
-        ids=delete_data.ids,
-        model_class=AdCampaignKeyword,
-        ownership_field="clerk_user_id",
-        message_template="Deleted {0} ad_campaign_keyword relations",
-        batch_size=batch_size
-    )
-
-
-@router.post("/relations/ad_group_keyword/bulk/delete", response_model=BulkDeleteResponse)
-async def bulk_delete_adgroup_keyword_relations(
-    delete_data: BulkDeleteRequest,
-    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Bulk delete ad_group_keyword relations"""
-    return bulk_delete_with_batches(
-        db=db,
-        user_id=user_id,
-        ids=delete_data.ids,
-        model_class=AdGroupKeyword,
-        ownership_field="clerk_user_id",
-        message_template="Deleted {0} ad_group_keyword relations",
-        batch_size=batch_size
     )

@@ -776,6 +776,337 @@ class TestAdGroupEndpoints:
         assert data["deleted"] == 2
 
 
+class TestColumnMappingsEndpoints:
+    """Test column mappings create/remove endpoints."""
+
+    def test_toggle_column_mapping_create(self, client, create_test_company):
+        """Test creating a column mapping via create action."""
+        # Create a second company
+        company2_data = {"title": "Test Company 2", "is_active": True}
+        response = client.post("/companies", json=company2_data)
+        assert response.status_code == 201
+        company2 = response.json()["object"]
+
+        # Get first company
+        companies_response = client.get("/companies?page_size=10")
+        companies = companies_response.json()["objects"]
+        company1 = companies[0]
+
+        # Create mapping
+        mapping_data = {
+            "action": "create",
+            "source_company_id": company1["id"],
+            "source_match_type": "broad",
+            "target_company_id": company2["id"],
+            "target_match_type": "exact"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["action"] == "created"
+        assert "mapping_id" in data
+
+        mapping_id = data["mapping_id"]
+
+        # Verify mapping appears in active mappings endpoint
+        mappings_response = client.get("/column-mappings/active")
+        mappings_data = mappings_response.json()["objects"]
+        assert len(mappings_data) >= 1
+
+        # Find our mapping
+        mapping = next((m for m in mappings_data if m["id"] == mapping_id), None)
+        assert mapping is not None
+        assert mapping["source_company_id"] == company1["id"]
+        assert mapping["target_company_id"] == company2["id"]
+
+    def test_toggle_column_mapping_delete(self, client, create_test_company):
+        """Test removing a column mapping via remove action."""
+        # Create a second company
+        company2_data = {"title": "Test Company 2", "is_active": True}
+        response = client.post("/companies", json=company2_data)
+        assert response.status_code == 201
+        company2 = response.json()["object"]
+
+        # Get first company
+        companies_response = client.get("/companies?page_size=10")
+        companies = companies_response.json()["objects"]
+        company1 = companies[0]
+
+        # Create mapping first
+        mapping_data = {
+            "action": "create",
+            "source_company_id": company1["id"],
+            "source_match_type": "broad",
+            "target_company_id": company2["id"],
+            "target_match_type": "exact"
+        }
+
+        # Create
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 200
+        assert response.json()["action"] == "created"
+        mapping_id = response.json()["mapping_id"]
+
+        # Delete (remove action)
+        remove_data = {
+            "action": "remove",
+            "source_company_id": company1["id"],
+            "source_match_type": "broad",
+            "target_company_id": company2["id"],
+            "target_match_type": "exact"
+        }
+        response = client.post("/column-mappings/toggle", json=remove_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["action"] == "removed"
+        assert data["mapping_id"] == mapping_id
+
+        # Verify mapping is gone from active mappings
+        mappings_response = client.get("/column-mappings/active")
+        mappings_data = mappings_response.json()["objects"]
+        mapping = next((m for m in mappings_data if m["id"] == mapping_id), None)
+        assert mapping is None
+
+    def test_toggle_column_mapping_cross_entity(self, client, create_test_company, create_test_campaign):
+        """Test column mapping between different entity types."""
+        company = create_test_company
+        campaign = create_test_campaign
+
+        # Create mapping from company to campaign
+        mapping_data = {
+            "action": "create",
+            "source_company_id": company["id"],
+            "source_match_type": "phrase",
+            "target_ad_campaign_id": campaign["id"],
+            "target_match_type": "broad"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 200
+        assert response.json()["action"] == "created"
+
+        # Verify in active mappings endpoint
+        mappings_response = client.get("/column-mappings/active")
+        mappings_data = mappings_response.json()["objects"]
+        assert len(mappings_data) >= 1
+
+        # Find our mapping
+        mapping = next((m for m in mappings_data if m["source_company_id"] == company["id"] and m["target_ad_campaign_id"] == campaign["id"]), None)
+        assert mapping is not None
+
+    def test_toggle_column_mapping_invalid_source_entity(self, client):
+        """Test toggle with invalid source entity."""
+        mapping_data = {
+            "action": "create",
+            "source_company_id": 99999,  # Non-existent
+            "source_match_type": "broad",
+            "target_company_id": 1,
+            "target_match_type": "exact"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"].lower()
+
+    def test_toggle_column_mapping_invalid_target_entity(self, client, create_test_company):
+        """Test toggle with invalid target entity."""
+        companies_response = client.get("/companies?page_size=10")
+        companies = companies_response.json()["objects"]
+        company = companies[0]
+
+        mapping_data = {
+            "action": "create",
+            "source_company_id": company["id"],
+            "source_match_type": "broad",
+            "target_company_id": 99999,  # Non-existent
+            "target_match_type": "exact"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"].lower()
+
+    def test_toggle_column_mapping_invalid_match_type(self, client, create_test_company):
+        """Test toggle with invalid match type."""
+        # Create a second company
+        company2_data = {"title": "Test Company 2", "is_active": True}
+        response = client.post("/companies", json=company2_data)
+        assert response.status_code == 201
+        company2 = response.json()["object"]
+
+        # Get first company
+        companies_response = client.get("/companies?page_size=10")
+        companies = companies_response.json()["objects"]
+        company1 = companies[0]
+
+        mapping_data = {
+            "action": "create",
+            "source_company_id": company1["id"],
+            "source_match_type": "invalid",  # Invalid match type
+            "target_company_id": company2["id"],
+            "target_match_type": "exact"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 422  # Validation error
+
+    def test_toggle_column_mapping_missing_entity(self, client):
+        """Test toggle with missing source entity."""
+        mapping_data = {
+            "action": "create",
+            "source_match_type": "broad",
+            "target_company_id": 1,
+            "target_match_type": "exact"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 422  # Validation error
+
+    def test_toggle_column_mapping_multiple_entities(self, client, create_test_company):
+        """Test toggle with multiple source entities (should fail)."""
+        # Create a second company
+        company2_data = {"title": "Test Company 2", "is_active": True}
+        response = client.post("/companies", json=company2_data)
+        assert response.status_code == 201
+        company2 = response.json()["object"]
+
+        # Get first company
+        companies_response = client.get("/companies?page_size=10")
+        companies = companies_response.json()["objects"]
+        company1 = companies[0]
+
+        mapping_data = {
+            "action": "create",
+            "source_company_id": company1["id"],
+            "source_ad_campaign_id": 1,  # Multiple source entities
+            "source_match_type": "broad",
+            "target_company_id": company2["id"],
+            "target_match_type": "exact"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 422  # Validation error
+
+    def test_toggle_column_mapping_negative_match_types(self, client, create_test_company):
+        """Test creating column mappings with negative match types."""
+        # Create a second company
+        company2_data = {"title": "Test Company 2", "is_active": True}
+        response = client.post("/companies", json=company2_data)
+        assert response.status_code == 201
+        company2 = response.json()["object"]
+
+        # Get first company
+        companies_response = client.get("/companies?page_size=10")
+        companies = companies_response.json()["objects"]
+        company1 = companies[0]
+
+        # Test creating mapping with negative source match type
+        mapping_data = {
+            "action": "create",
+            "source_company_id": company1["id"],
+            "source_match_type": "neg_broad",
+            "target_company_id": company2["id"],
+            "target_match_type": "exact"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["action"] == "created"
+        assert "mapping_id" in data
+
+        # Verify mapping was created
+        mappings_response = client.get("/column-mappings/active")
+        assert mappings_response.status_code == 200
+        mappings = mappings_response.json()["objects"]
+        assert len(mappings) == 1
+        assert mappings[0]["source_match_type"] == "neg_broad"
+        assert mappings[0]["target_match_type"] == "exact"
+
+        # Test creating mapping with negative target match type
+        mapping_data2 = {
+            "action": "create",
+            "source_company_id": company1["id"],
+            "source_match_type": "broad",
+            "target_company_id": company2["id"],
+            "target_match_type": "neg_phrase"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data2)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["action"] == "created"
+        assert "mapping_id" in data
+
+        # Verify both mappings exist
+        mappings_response = client.get("/column-mappings/active")
+        assert mappings_response.status_code == 200
+        mappings = mappings_response.json()["objects"]
+        assert len(mappings) == 2
+        
+        match_types = {m["source_match_type"] + "->" + m["target_match_type"] for m in mappings}
+        assert "neg_broad->exact" in match_types
+        assert "broad->neg_phrase" in match_types
+
+    def test_toggle_column_mapping_generic_entity_format(self, client, create_test_company):
+        """Test creating column mappings using the generic entity_type + entity_id format."""
+        # Create a second company
+        company2_data = {"title": "Test Company 2", "is_active": True}
+        response = client.post("/companies", json=company2_data)
+        assert response.status_code == 201
+        company2 = response.json()["object"]
+
+        # Get first company
+        companies_response = client.get("/companies?page_size=10")
+        companies = companies_response.json()["objects"]
+        company1 = companies[0]
+
+        # Create a test campaign for the first company
+        campaign_data = {
+            "title": "Test Campaign for Generic Format",
+            "company_id": company1["id"],
+            "is_active": True
+        }
+        response = client.post("/ad_campaigns", json=campaign_data)
+        assert response.status_code == 201
+        campaign = response.json()["object"]
+
+        # Test creating mapping using generic format (source: ad_campaign, target: company)
+        mapping_data = {
+            "action": "create",
+            "source_entity_type": "ad_campaign",
+            "source_entity_id": campaign["id"],
+            "source_match_type": "exact",
+            "target_entity_type": "company",
+            "target_entity_id": company2["id"],
+            "target_match_type": "broad"
+        }
+
+        response = client.post("/column-mappings/toggle", json=mapping_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["action"] == "created"
+        assert "mapping_id" in data
+
+        # Verify mapping was created and converted correctly
+        mappings_response = client.get("/column-mappings/active")
+        assert mappings_response.status_code == 200
+        mappings = mappings_response.json()["objects"]
+        assert len(mappings) >= 1
+        
+        # Find our mapping
+        mapping = next((m for m in mappings if m["source_ad_campaign_id"] == campaign["id"] and m["target_company_id"] == company2["id"]), None)
+        assert mapping is not None
+        assert mapping["source_match_type"] == "exact"
+        assert mapping["target_match_type"] == "broad"
+
+
 class TestKeywordEndpoints:
     """Test all keyword-related endpoints."""
 
@@ -1003,8 +1334,8 @@ class TestKeywordEndpoints:
         data = response.json()
         assert data["deleted"] == 2
 
-    def test_bulk_update_keyword_relations(self, client, create_test_keyword, create_test_company):
-        """Test bulk updating keyword relations."""
+    def test_bulk_upsert_keyword_relations(self, client, create_test_keyword, create_test_company):
+        """Test bulk upserting keyword relations (create and update)."""
         keyword_id = create_test_keyword["id"]
 
         # First attach keyword to company
@@ -1028,9 +1359,12 @@ class TestKeywordEndpoints:
         }
         client.post("/keywords/bulk/relations", json=create_relations_data)
 
-        # Now update the relations
+        # Now update the existing relations using the same endpoint
         update_data = {
             "keyword_ids": [keyword_id],
+            "company_ids": [create_test_company["id"]],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
             "broad": False,
             "phrase": True,
             "exact": True,
@@ -1045,10 +1379,16 @@ class TestKeywordEndpoints:
             "override_neg_exact": False
         }
 
-        response = client.post("/keywords/bulk/relations/update", json=update_data)
+        response = client.post("/keywords/bulk/relations", json=update_data)
         assert response.status_code == 200
         data = response.json()
         assert data["updated"] == 1  # 1 relation updated
+        assert data["created"] == 0  # 0 relations created
+        assert "relations" in data
+        assert len(data["relations"]) == 1
+        assert data["relations"][0]["phrase"] is True
+        assert data["relations"][0]["exact"] is True
+        assert data["relations"][0]["broad"] is False
 
     def test_bulk_create_keyword_relations(self, client, create_test_keyword, create_test_company):
         """Test bulk creating keyword relations."""
@@ -1077,9 +1417,14 @@ class TestKeywordEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["created"] == 1
+        assert "relations" in data
+        assert len(data["relations"]) == 1
+        assert data["relations"][0]["broad"] is True
+        assert data["relations"][0]["phrase"] is True
+        assert data["relations"][0]["exact"] is False
 
-    def test_bulk_delete_ad_company_keyword_relations(self, client, create_test_keyword, create_test_company):
-        """Test bulk deleting ad_company_keyword relations."""
+    def test_bulk_delete_company_keyword_relations(self, client, create_test_keyword, create_test_company):
+        """Test bulk deleting company-keyword relations."""
         keyword_id = create_test_keyword["id"]
         company_id = create_test_company["id"]
 
@@ -1104,13 +1449,26 @@ class TestKeywordEndpoints:
         }
         client.post("/keywords/bulk/relations", json=relations_data)
 
-        # Delete the relation
-        delete_data = {"ids": [1]}  # Assuming the relation ID is 1
-        response = client.post("/relations/ad_company_keyword/bulk/delete", json=delete_data)
+        # Delete the relation by setting all match types to None with override flags
+        delete_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": None,
+            "phrase": None,
+            "exact": None,
+            "override_broad": True,
+            "override_phrase": True,
+            "override_exact": True
+        }
+        response = client.post("/keywords/bulk/relations", json=delete_data)
         assert response.status_code == 200
+        data = response.json()
+        assert data["deleted"] == 1
 
-    def test_bulk_delete_ad_campaign_keyword_relations(self, client, create_test_keyword, create_test_campaign):
-        """Test bulk deleting ad_campaign_keyword relations."""
+    def test_bulk_delete_campaign_keyword_relations(self, client, create_test_keyword, create_test_campaign):
+        """Test bulk deleting campaign-keyword relations."""
         keyword_id = create_test_keyword["id"]
         campaign_id = create_test_campaign["id"]
 
@@ -1135,13 +1493,26 @@ class TestKeywordEndpoints:
         }
         client.post("/keywords/bulk/relations", json=relations_data)
 
-        # Delete the relation
-        delete_data = {"ids": [1]}  # Assuming the relation ID is 1
-        response = client.post("/relations/ad_campaign_keyword/bulk/delete", json=delete_data)
+        # Delete the relation by setting all match types to False with override flags
+        delete_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [],
+            "ad_campaign_ids": [campaign_id],
+            "ad_group_ids": [],
+            "broad": None,
+            "phrase": None,
+            "exact": None,
+            "override_broad": True,
+            "override_phrase": True,
+            "override_exact": True
+        }
+        response = client.post("/keywords/bulk/relations", json=delete_data)
         assert response.status_code == 200
+        data = response.json()
+        assert data["deleted"] == 1
 
     def test_bulk_delete_adgroup_keyword_relations(self, client, create_test_keyword, create_test_ad_group):
-        """Test bulk deleting ad_group_keyword relations."""
+        """Test bulk deleting ad group-keyword relations."""
         keyword_id = create_test_keyword["id"]
         ad_group_id = create_test_ad_group["id"]
 
@@ -1166,10 +1537,477 @@ class TestKeywordEndpoints:
         }
         client.post("/keywords/bulk/relations", json=relations_data)
 
-        # Delete the relation
-        delete_data = {"ids": [1]}  # Assuming the relation ID is 1
-        response = client.post("/relations/ad_group_keyword/bulk/delete", json=delete_data)
+        # Delete the relation by setting all match types to None with override flags
+        delete_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [ad_group_id],
+            "broad": None,
+            "phrase": None,
+            "exact": None,
+            "override_broad": True,
+            "override_phrase": True,
+            "override_exact": True
+        }
+        response = client.post("/keywords/bulk/relations", json=delete_data)
         assert response.status_code == 200
+        data = response.json()
+        assert data["deleted"] == 1
+
+
+class TestKeywordTrash:
+    """Test keyword trash functionality."""
+
+    def test_bulk_trash_keywords(self, client, demo_user_id):
+        """Test bulk trashing keywords."""
+        # Create keywords
+        bulk_data = {
+            "keywords": ["trash_keyword1", "trash_keyword2", "trash_keyword3"],
+            "company_ids": [],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": False,
+            "exact": False,
+            "pause": False,
+            "override_broad": False,
+            "override_phrase": False,
+            "override_exact": False,
+            "override_pause": False
+        }
+        response = client.post("/keywords/bulk", json=bulk_data)
+        assert response.status_code == 201
+        keyword_ids = [kw["id"] for kw in response.json()["objects"]]
+
+        # Verify keywords are not trashed initially
+        for kw in response.json()["objects"]:
+            assert kw["trash"] is None
+
+        # Trash first two keywords
+        trash_data = {"ids": keyword_ids[:2], "trash": True}
+        response = client.post("/keywords/bulk/trash", json=trash_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["deleted"] == 2  # Using deleted field for consistency
+        assert "trashed" in data["message"]
+
+        # Verify keywords are now trashed
+        response = client.get("/keywords")
+        assert response.status_code == 200
+        keywords = response.json()["objects"]
+        trashed_keywords = [kw for kw in keywords if kw["id"] in keyword_ids[:2]]
+        not_trashed_keywords = [kw for kw in keywords if kw["id"] == keyword_ids[2]]
+
+        for kw in trashed_keywords:
+            assert kw["trash"] is True
+        for kw in not_trashed_keywords:
+            assert kw["trash"] is None
+
+    def test_bulk_untrash_keywords(self, client, demo_user_id):
+        """Test bulk untrashing keywords."""
+        # Create and trash keywords
+        bulk_data = {
+            "keywords": ["untrash_keyword1", "untrash_keyword2"],
+            "company_ids": [],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": False,
+            "exact": False,
+            "pause": False,
+            "override_broad": False,
+            "override_phrase": False,
+            "override_exact": False,
+            "override_pause": False
+        }
+        response = client.post("/keywords/bulk", json=bulk_data)
+        keyword_ids = [kw["id"] for kw in response.json()["objects"]]
+
+        # Trash them
+        trash_data = {"ids": keyword_ids, "trash": True}
+        client.post("/keywords/bulk/trash", json=trash_data)
+
+        # Untrash them
+        untrash_data = {"ids": keyword_ids, "trash": False}
+        response = client.post("/keywords/bulk/trash", json=untrash_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["deleted"] == 2
+        assert "untrashed" in data["message"]
+
+        # Verify keywords are not trashed
+        response = client.get("/keywords")
+        assert response.status_code == 200
+        keywords = response.json()["objects"]
+        untrashed_keywords = [kw for kw in keywords if kw["id"] in keyword_ids]
+
+        for kw in untrashed_keywords:
+            assert kw["trash"] is False
+
+    def test_filter_keywords_by_trash_status(self, client, demo_user_id):
+        """Test filtering keywords by trash status."""
+        # Create keywords
+        bulk_data = {
+            "keywords": ["filter_trash1", "filter_trash2", "filter_normal1", "filter_normal2"],
+            "company_ids": [],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": False,
+            "exact": False,
+            "pause": False,
+            "override_broad": False,
+            "override_phrase": False,
+            "override_exact": False,
+            "override_pause": False
+        }
+        response = client.post("/keywords/bulk", json=bulk_data)
+        keyword_ids = [kw["id"] for kw in response.json()["objects"]]
+
+        # Trash first two keywords
+        trash_data = {"ids": keyword_ids[:2], "trash": True}
+        client.post("/keywords/bulk/trash", json=trash_data)
+
+        # Test filter trash=True
+        response = client.get("/keywords?trash=true")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["objects"]) == 2
+        for kw in data["objects"]:
+            assert kw["trash"] is True
+
+        # Test filter trash=False
+        response = client.get("/keywords?trash=false")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["objects"]) == 2
+        for kw in data["objects"]:
+            # Should be either None or False (not trashed)
+            assert kw["trash"] is None or kw["trash"] is False
+
+        # Test no filter (should return all)
+        response = client.get("/keywords")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["objects"]) == 4
+        trash_counts = {"trashed": 0, "not_trashed": 0, "none": 0}
+        for kw in data["objects"]:
+            if kw["trash"] is True:
+                trash_counts["trashed"] += 1
+            elif kw["trash"] is False:
+                trash_counts["not_trashed"] += 1
+            else:
+                trash_counts["none"] += 1
+        assert trash_counts["trashed"] == 2
+        assert trash_counts["not_trashed"] == 0  # Untrashed keywords have trash=False
+        assert trash_counts["none"] == 2  # Newly created keywords have trash=None
+
+    def test_sort_keywords_by_trash(self, client, demo_user_id):
+        """Test sorting keywords by trash status."""
+        # Create keywords
+        bulk_data = {
+            "keywords": ["sort_trash1", "sort_trash2", "sort_normal1"],
+            "company_ids": [],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": False,
+            "exact": False,
+            "pause": False,
+            "override_broad": False,
+            "override_phrase": False,
+            "override_exact": False,
+            "override_pause": False
+        }
+        response = client.post("/keywords/bulk", json=bulk_data)
+        keyword_ids = [kw["id"] for kw in response.json()["objects"]]
+
+        # Trash first keyword
+        trash_data = {"ids": [keyword_ids[0]], "trash": True}
+        client.post("/keywords/bulk/trash", json=trash_data)
+
+        # Sort by trash asc
+        response = client.get("/keywords?sort_by=trash&sort_order=asc")
+        assert response.status_code == 200
+        data = response.json()
+        # Should be ordered: None, False, True (but we only have None and True)
+        trash_values = [kw["trash"] for kw in data["objects"]]
+        # Check that None values come before True values
+        none_index = next(i for i, v in enumerate(trash_values) if v is None)
+        true_index = next(i for i, v in enumerate(trash_values) if v is True)
+        assert none_index < true_index
+
+        # Sort by trash desc
+        response = client.get("/keywords?sort_by=trash&sort_order=desc")
+        assert response.status_code == 200
+        data = response.json()
+        trash_values = [kw["trash"] for kw in data["objects"]]
+        # Should be ordered: True, None
+        true_index = next(i for i, v in enumerate(trash_values) if v is True)
+        none_index = next(i for i, v in enumerate(trash_values) if v is None)
+        assert true_index < none_index
+
+    def test_update_keyword_trash_status(self, client, create_test_keyword):
+        """Test updating a keyword's trash status."""
+        keyword_id = create_test_keyword["id"]
+
+        # Update to trash
+        update_data = {"keyword": create_test_keyword["keyword"], "trash": True}
+        response = client.post(f"/keywords/{keyword_id}/update", json=update_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["object"]["trash"] is True
+
+        # Update to untrash
+        update_data = {"keyword": create_test_keyword["keyword"], "trash": False}
+        response = client.post(f"/keywords/{keyword_id}/update", json=update_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["object"]["trash"] is False
+
+        # Update without trash field (should not change)
+        update_data = {"keyword": "updated_keyword"}
+        response = client.post(f"/keywords/{keyword_id}/update", json=update_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["object"]["trash"] is False  # Should remain unchanged
+
+
+class TestKeywordOverrideFlags:
+    """Test keyword override flag functionality."""
+
+    def test_override_true_always_overwrites(self, client, create_test_keyword, create_test_company):
+        """Test that override=true always overwrites existing values."""
+        keyword_id = create_test_keyword["id"]
+        company_id = create_test_company["id"]
+
+        # First create a relation with broad=true
+        create_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": None,
+            "exact": None,
+            "override_broad": True,  # Need override=true to set broad
+            "override_phrase": False,
+            "override_exact": False
+        }
+        client.post("/keywords/bulk/relations", json=create_data)
+
+        # Now try to update with override_broad=true and broad=false - should overwrite
+        update_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": False,
+            "phrase": None,
+            "exact": None,
+            "override_broad": True,
+            "override_phrase": False,
+            "override_exact": False
+        }
+        response = client.post("/keywords/bulk/relations", json=update_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["updated"] == 1
+        assert data["relations"][0]["broad"] is False  # Should be overwritten
+
+    def test_override_false_never_sets_values(self, client, create_test_keyword, create_test_company):
+        """Test that override=false never sets values, even for null existing values."""
+        keyword_id = create_test_keyword["id"]
+        company_id = create_test_company["id"]
+
+        # Try to set broad with override=false - should create relation with requested values
+        update_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": None,
+            "exact": None,
+            "override_broad": False,  # Override flags don't affect new relation creation
+            "override_phrase": False,
+            "override_exact": False
+        }
+        response = client.post("/keywords/bulk/relations", json=update_data)
+        assert response.status_code == 200
+        data = response.json()
+        # Should create a new relation with the requested values
+        assert data["created"] == 1
+        assert data["updated"] == 0
+        # The relation should have broad=True since that's what was requested
+        assert data["relations"][0]["broad"] is True
+
+    def test_override_false_does_not_override_existing(self, client, create_test_keyword, create_test_company):
+        """Test that override=false does not override existing values."""
+        keyword_id = create_test_keyword["id"]
+        company_id = create_test_company["id"]
+
+        # First create a relation with broad=true
+        create_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": None,
+            "exact": None,
+            "override_broad": True,
+            "override_phrase": False,
+            "override_exact": False
+        }
+        client.post("/keywords/bulk/relations", json=create_data)
+
+        # Now try to update with override_broad=false and broad=false - should NOT overwrite
+        update_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": False,
+            "phrase": None,
+            "exact": None,
+            "override_broad": False,  # Should not change broad
+            "override_phrase": False,
+            "override_exact": False
+        }
+        response = client.post("/keywords/bulk/relations", json=update_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["updated"] == 0  # Should not be updated
+        assert len(data["relations"]) == 0  # No relations returned since none were updated
+
+    def test_null_fields_in_request_are_not_touched(self, client, create_test_keyword, create_test_company):
+        """Test that fields with null values in the request are not modified."""
+        keyword_id = create_test_keyword["id"]
+        company_id = create_test_company["id"]
+
+        # Create a relation with all match types set
+        create_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": False,
+            "exact": True,
+            "override_broad": True,
+            "override_phrase": True,
+            "override_exact": True
+        }
+        client.post("/keywords/bulk/relations", json=create_data)
+
+        # Update with null values for phrase and exact - should not touch them
+        update_data = {
+            "keyword_ids": [keyword_id],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": False,  # Change broad
+            "phrase": None,  # Don't touch phrase
+            "exact": None,   # Don't touch exact
+            "override_broad": True,   # Override broad
+            "override_phrase": False, # Don't override phrase (but it's null anyway)
+            "override_exact": False   # Don't override exact (but it's null anyway)
+        }
+        response = client.post("/keywords/bulk/relations", json=update_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["updated"] == 1
+        relation = data["relations"][0]
+        assert relation["broad"] is False  # Should be changed
+        assert relation["phrase"] is False  # Should remain unchanged
+        assert relation["exact"] is True    # Should remain unchanged
+
+    def test_multiple_keywords_different_override_scenarios(self, client, create_test_company):
+        """Test multiple keywords with different existing states and override scenarios."""
+        company_id = create_test_company["id"]
+
+        # Create 3 keywords
+        bulk_create_data = {
+            "keywords": ["keyword_override_1", "keyword_override_2", "keyword_override_3"],
+            "company_ids": [],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": None,
+            "phrase": None,
+            "exact": None,
+            "override_broad": False,
+            "override_phrase": False,
+            "override_exact": False
+        }
+        response = client.post("/keywords/bulk", json=bulk_create_data)
+        keywords = response.json()["objects"]
+        keyword_ids = [kw["id"] for kw in keywords]
+
+        # Set up different initial states:
+        # keyword 1: broad = true
+        # keyword 2: broad = null
+        # keyword 3: broad = false
+
+        setup_data_1 = {
+            "keyword_ids": [keyword_ids[0]],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": None,
+            "exact": None,
+            "override_broad": False,
+            "override_phrase": False,
+            "override_exact": False
+        }
+        client.post("/keywords/bulk/relations", json=setup_data_1)
+
+        setup_data_3 = {
+            "keyword_ids": [keyword_ids[2]],
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": False,
+            "phrase": None,
+            "exact": None,
+            "override_broad": False,
+            "override_phrase": False,
+            "override_exact": False
+        }
+        client.post("/keywords/bulk/relations", json=setup_data_3)
+
+        # Now update all with override_broad=false and broad=true
+        # Expected results:
+        # keyword 1 (broad=true): should NOT be updated (override=false)
+        # keyword 2 (broad=null): should create new relation with broad=true (no existing relation)
+        # keyword 3 (broad=false): should NOT be updated (override=false)
+
+        update_data = {
+            "keyword_ids": keyword_ids,
+            "company_ids": [company_id],
+            "ad_campaign_ids": [],
+            "ad_group_ids": [],
+            "broad": True,
+            "phrase": None,
+            "exact": None,
+            "override_broad": False,  # Override flags don't affect new relation creation
+            "override_phrase": False,
+            "override_exact": False
+        }
+        response = client.post("/keywords/bulk/relations", json=update_data)
+        assert response.status_code == 200
+        data = response.json()
+
+        # keyword 2 should have a new relation created
+        assert data["created"] == 1
+        assert data["updated"] == 0
+        assert len(data["relations"]) == 1
+
+        created_relation = data["relations"][0]
+        assert created_relation["keyword_id"] == keyword_ids[1]  # keyword 2
+        assert created_relation["broad"] is True  # Should be set to true
 
 
 class TestPagination:
@@ -1221,7 +2059,7 @@ class TestErrorHandling:
 
     def test_invalid_json_payload(self, client):
         """Test handling of invalid JSON payloads."""
-        response = client.post("/companies", data="invalid json")
+        response = client.post("/companies", content="invalid json")
         assert response.status_code == 422
 
     def test_non_existent_endpoints(self, client):

@@ -291,15 +291,9 @@ def create_keywords_with_relations(
                 "broad": random.choice([True, False]),
                 "phrase": random.choice([True, False]),
                 "exact": random.choice([True, False]),
-                "neg_broad": random.choice([True, False]),
-                "neg_phrase": random.choice([True, False]),
-                "neg_exact": random.choice([True, False]),
                 "override_broad": True,
                 "override_phrase": True,
                 "override_exact": True,
-                "override_neg_broad": True,
-                "override_neg_phrase": True,
-                "override_neg_exact": True
             },
             params={"batch_size": 25}
         )

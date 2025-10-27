@@ -6,13 +6,12 @@ from sqlalchemy.orm import Session
 
 from src.core.database import get_db
 from src.core.settings import (
-    BATCH_SIZE,
     COMPANY_ACTIVE_LIMIT,
     DEFAULT_PAGE,
     MAX_PAGE_SIZE,
     PAGE_SIZE,
 )
-from src.models.models import AdCampaign, Company
+from src.models.models import Company
 from src.schemas.schemas import (
     BulkDeleteRequest,
     BulkDeleteResponse,
@@ -21,8 +20,7 @@ from src.schemas.schemas import (
     MultipleObjectsResponse,
     SingleObjectResponse,
 )
-from src.utils.helpers import (
-    get_companies_metadata,
+from src.utils.entity_helpers import (
     handle_bulk_delete,
     handle_create_entity,
     handle_get_entity,
@@ -30,6 +28,7 @@ from src.utils.helpers import (
     handle_toggle_entity,
     handle_update_entity,
 )
+from src.utils.metadata_helpers import get_companies_metadata
 from src.utils.auth import get_current_user_id
 
 router = APIRouter()
@@ -100,12 +99,11 @@ async def update_company(
 @router.post("/companies/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_companies(
     delete_data: BulkDeleteRequest,
-    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Bulk delete companies"""
-    return handle_bulk_delete(delete_data, db, user_id, company_config, batch_size)
+    return handle_bulk_delete(delete_data, db, user_id, company_config)
 
 @router.post("/companies/{company_id}/toggle", response_model=SingleObjectResponse)
 async def toggle_company_active(

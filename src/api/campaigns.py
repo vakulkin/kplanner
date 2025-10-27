@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from src.core.database import get_db
 from src.core.settings import (
     AD_CAMPAIGN_ACTIVE_LIMIT,
-    BATCH_SIZE,
     DEFAULT_PAGE,
     MAX_PAGE_SIZE,
     PAGE_SIZE,
@@ -21,8 +20,7 @@ from src.schemas.schemas import (
     MultipleObjectsResponse,
     SingleObjectResponse,
 )
-from src.utils.helpers import (
-    get_ad_campaigns_metadata,
+from src.utils.entity_helpers import (
     handle_bulk_delete,
     handle_create_entity,
     handle_get_entity,
@@ -30,6 +28,7 @@ from src.utils.helpers import (
     handle_toggle_entity,
     handle_update_entity,
 )
+from src.utils.metadata_helpers import get_ad_campaigns_metadata
 from src.utils.auth import get_current_user_id
 
 router = APIRouter()
@@ -101,12 +100,11 @@ async def update_ad_campaign(
 @router.post("/ad_campaigns/bulk/delete", response_model=BulkDeleteResponse)
 async def bulk_delete_ad_campaigns(
     delete_data: BulkDeleteRequest,
-    batch_size: int = Query(BATCH_SIZE, ge=1, description="Batch size for processing"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """Bulk delete ad campaigns"""
-    return handle_bulk_delete(delete_data, db, user_id, campaign_config, batch_size)
+    return handle_bulk_delete(delete_data, db, user_id, campaign_config)
 
 @router.post("/ad_campaigns/{campaign_id}/toggle", response_model=SingleObjectResponse)
 async def toggle_ad_campaign_active(

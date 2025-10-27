@@ -1,320 +1,35 @@
-from fastapi import HTTPException
-from sqlalchemy.orm import Session
-from typing import Optional
+"""
+Entity helper functions for KPlanner API.
+
+This module contains utility functions for entity CRUD operations,
+including creation, retrieval, updating, and listing with filtering.
+"""
+
 from datetime import datetime
-import math
-from ..core.settings import DEFAULT_PAGE, PAGE_SIZE, MAX_PAGE_SIZE, BATCH_SIZE
-from ..schemas.schemas import SingleObjectResponse, MultipleObjectsResponse, BulkDeleteResponse, BulkDeleteRequest
+from typing import Optional
+from sqlalchemy.orm import Session
+from fastapi import HTTPException
+
+from src.schemas.schemas import SingleObjectResponse, MultipleObjectsResponse, BulkDeleteRequest
+from src.utils.database_helpers import paginate_query, apply_date_filters, apply_sorting
+from src.utils.bulk_helpers import bulk_delete_with_batches
 
 
-# Helper function for pagination
-def paginate_query(query, page: int = DEFAULT_PAGE, page_size: int = PAGE_SIZE):
-    # Validate and limit page_size
-    page_size = min(max(1, page_size), MAX_PAGE_SIZE)  # Between 1 and MAX_PAGE_SIZE
-    page = max(DEFAULT_PAGE, page)  # At least DEFAULT_PAGE
+def get_entity_sort_fields(parent_field: str = None):
+    """Generate sort fields map for an entity based on its model class."""
+    base_fields = {
+        "id": "id",
+        "title": "title",
+        "is_active": "is_active",
+        "created": "created",
+        "updated": "updated"
+    }
 
-    # Get total count
-    total_count = query.count()
-
-    # Calculate total pages
-    total_pages = math.ceil(total_count / page_size) if total_count > 0 else 1
-
-    # Apply pagination
-    offset = (page - 1) * page_size
-    items = query.offset(offset).limit(page_size).all()
-
-    return items, total_count, total_pages
-
-
-# Helper function to apply common date filters
-def apply_date_filters(query, model_class, created_after, created_before, updated_after, updated_before):
-    """Apply common date filters to a query."""
-    if created_after:
-        query = query.filter(model_class.created >= created_after)
-    if created_before:
-        query = query.filter(model_class.created <= created_before)
-    if updated_after:
-        query = query.filter(model_class.updated >= updated_after)
-    if updated_before:
-        query = query.filter(model_class.updated <= updated_before)
-    return query
-
-
-# Helper function to apply sorting
-def apply_sorting(query, model_class, sort_by, sort_order, sort_fields_map, default_field="created"):
-    """Apply sorting to a query based on field mapping."""
-    sort_field = sort_by.lower() if sort_by else default_field
-    sort_direction = sort_order.lower() if sort_order else "desc"
-
-    if sort_field in sort_fields_map:
-        order_column = sort_fields_map[sort_field]
-        if sort_direction == "asc":
-            query = query.order_by(order_column.asc())
-        else:
-            query = query.order_by(order_column.desc())
-    else:
-        # Default sorting
-        default_column = sort_fields_map.get(default_field, model_class.created)
-        query = query.order_by(default_column.desc())
-
-    return query
-
-
-# Helper function to generate common metadata structure
-def generate_metadata(entity_type, parent_field=None, additional_sort_fields=None):
-    """Generate common filter and sorting metadata for entity endpoints."""
-    filters = {}
-
-    # Add parent filter if applicable
+    # Add parent field if exists
     if parent_field:
-        filters[parent_field] = {
-            "type": "integer",
-            "description": f"Filter by parent {parent_field.replace('_', ' ')}"
-        }
+        base_fields[parent_field] = parent_field
 
-    # Add search filter
-    filters["search"] = {
-        "type": "string",
-        "description": f"Search by {entity_type} title (case-insensitive, partial match)"
-    }
-
-    # Add is_active filter
-    filters["is_active"] = {
-        "type": "boolean",
-        "description": "Filter by is_active status",
-        "available_values": [True, False]
-    }
-
-    # Add common date filters
-    date_filters = {
-        "created_after": {
-            "type": "datetime",
-            "description": "Filter by created date (after)",
-            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
-        },
-        "created_before": {
-            "type": "datetime",
-            "description": "Filter by created date (before)",
-            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
-        },
-        "updated_after": {
-            "type": "datetime",
-            "description": "Filter by updated date (after)",
-            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
-        },
-        "updated_before": {
-            "type": "datetime",
-            "description": "Filter by updated date (before)",
-            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
-        }
-    }
-    filters.update(date_filters)
-
-    # Generate sorting metadata
-    sort_values = ["id", "title", "is_active", "created", "updated"]
-    if parent_field:
-        sort_values.insert(-2, parent_field)  # Insert before 'created'
-    if additional_sort_fields:
-        sort_values.extend(additional_sort_fields)
-
-    sorting = {
-        "sort_by": {
-            "type": "string",
-            "description": "Field to sort by",
-            "available_values": sort_values,
-            "default": "created"
-        },
-        "sort_order": {
-            "type": "string",
-            "description": "Sort direction",
-            "available_values": ["asc", "desc"],
-            "default": "desc"
-        }
-    }
-
-    return filters, sorting
-
-
-# Helper function to get sort fields map for standard entities
-def get_entity_sort_fields(model_class, parent_field: str = None):
-    """Generate sort fields map for entities with optional parent field."""
-    fields = {
-        "id": model_class.id,
-        "title": model_class.title,
-        "is_active": model_class.is_active,
-        "created": model_class.created,
-        "updated": model_class.updated
-    }
-
-    if parent_field:
-        fields[parent_field] = getattr(model_class, parent_field)
-
-    return fields
-
-
-# Helper functions for generating API metadata
-def get_companies_metadata():
-    """Get metadata for companies endpoint including available filters and sorting."""
-    return generate_metadata("company")
-
-
-def get_ad_campaigns_metadata():
-    """Get metadata for ad campaigns endpoint including available filters and sorting."""
-    return generate_metadata("campaign", parent_field="company_id")
-
-
-def get_ad_groups_metadata():
-    """Get metadata for ad groups endpoint including available filters and sorting."""
-    return generate_metadata("ad group", parent_field="ad_campaign_id")
-
-
-def get_keywords_metadata():
-    """Get metadata for keywords endpoint including available filters and sorting."""
-    filters = {
-        "only_attached": {
-            "type": "boolean",
-            "description": "Show only keywords attached to at least one entity",
-            "available_values": [True, False],
-            "default": False
-        },
-        "search": {
-            "type": "string",
-            "description": "Search by keyword text (case-insensitive, partial match)"
-        },
-        "created_after": {
-            "type": "datetime",
-            "description": "Filter by created date (after)",
-            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
-        },
-        "created_before": {
-            "type": "datetime",
-            "description": "Filter by created date (before)",
-            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
-        },
-        "updated_after": {
-            "type": "datetime",
-            "description": "Filter by updated date (after)",
-            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
-        },
-        "updated_before": {
-            "type": "datetime",
-            "description": "Filter by updated date (before)",
-            "format": "ISO 8601 (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
-        },
-        "has_broad": {
-            "type": "boolean",
-            "description": "Filter keywords with at least one broad match relation",
-            "available_values": [True, False]
-        },
-        "has_phrase": {
-            "type": "boolean",
-            "description": "Filter keywords with at least one phrase match relation",
-            "available_values": [True, False]
-        },
-        "has_exact": {
-            "type": "boolean",
-            "description": "Filter keywords with at least one exact match relation",
-            "available_values": [True, False]
-        },
-        "has_neg_broad": {
-            "type": "boolean",
-            "description": "Filter keywords with at least one negative broad match relation",
-            "available_values": [True, False]
-        },
-        "has_neg_phrase": {
-            "type": "boolean",
-            "description": "Filter keywords with at least one negative phrase match relation",
-            "available_values": [True, False]
-        },
-        "has_neg_exact": {
-            "type": "boolean",
-            "description": "Filter keywords with at least one negative exact match relation",
-            "available_values": [True, False]
-        }
-    }
-
-    sorting = {
-        "sort_by": {
-            "type": "string",
-            "description": "Primary sort field",
-            "available_values": ["id", "keyword", "created", "updated", "has_broad", "has_phrase", "has_exact", "has_neg_broad", "has_neg_phrase", "has_neg_exact"],
-            "default": "created"
-        },
-        "sort_order": {
-            "type": "string",
-            "description": "Primary sort direction",
-            "available_values": ["asc", "desc"],
-            "default": "desc"
-        },
-        "sort_by_2": {
-            "type": "string",
-            "description": "Secondary sort field (optional)",
-            "available_values": ["id", "keyword", "created", "updated", "has_broad", "has_phrase", "has_exact", "has_neg_broad", "has_neg_phrase", "has_neg_exact"]
-        },
-        "sort_order_2": {
-            "type": "string",
-            "description": "Secondary sort direction",
-            "available_values": ["asc", "desc"]
-        },
-        "sort_by_3": {
-            "type": "string",
-            "description": "Tertiary sort field (optional)",
-            "available_values": ["id", "keyword", "created", "updated", "has_broad", "has_phrase", "has_exact", "has_neg_broad", "has_neg_phrase", "has_neg_exact"]
-        },
-        "sort_order_3": {
-            "type": "string",
-            "description": "Tertiary sort direction",
-            "available_values": ["asc", "desc"]
-        }
-    }
-
-    return filters, sorting
-
-
-# Helper function for batch processing
-def process_in_batches(items: list, batch_size: int = BATCH_SIZE):
-    batch_size = max(1, batch_size)  # Ensure at least 1
-
-    for i in range(0, len(items), batch_size):
-        yield items[i:i + batch_size]
-
-
-def bulk_delete_with_batches(
-    db: Session,
-    user_id: str,
-    ids: list[int],
-    model_class,
-    ownership_field: str,
-    message_template: str,
-    batch_size: int = BATCH_SIZE
-) -> BulkDeleteResponse:
-    """Generic helper for bulk delete operations with batching and ownership validation."""
-    if not ids:
-        raise HTTPException(status_code=400, detail="ids is required")
-
-    deleted_count = 0
-    batches_processed = 0
-
-    # Process deletions in batches
-    for id_batch in process_in_batches(ids, batch_size=batch_size):
-        # Filter by ownership directly - works for all entities and relations!
-        batch_deleted = db.query(model_class).filter(
-            getattr(model_class, 'id').in_(id_batch),
-            getattr(model_class, ownership_field) == user_id
-        ).delete(synchronize_session=False)
-
-        deleted_count += batch_deleted
-        db.commit()
-        batches_processed += 1
-
-    return BulkDeleteResponse(
-        message=message_template.format(deleted_count),
-        deleted=deleted_count,
-        processed=deleted_count,
-        requested=len(ids),
-        batches_processed=batches_processed,
-        batch_size=batch_size
-    )
+    return base_fields
 
 
 def check_active_limit(
@@ -410,6 +125,7 @@ def get_entity_by_id(
     ).first()
     if not entity:
         raise HTTPException(status_code=404, detail=f"{entity_name.capitalize()} not found")
+    
     return SingleObjectResponse(
         message=f"{entity_name.capitalize()} retrieved successfully",
         object=schema_class.model_validate(entity)
@@ -451,6 +167,7 @@ def list_entities_with_filters(
     user_id: str,
     model_class,
     schema_class,
+    entity_name: str,
     entity_name_plural: str,
     page: int,
     page_size: int,
@@ -506,9 +223,14 @@ def list_entities_with_filters(
     filters, sorting = metadata_func()
 
     # Build response
+    response_objects = []
+    for entity in entities:
+        entity_dict = schema_class.model_validate(entity).model_dump()
+        response_objects.append(entity_dict)
+
     return MultipleObjectsResponse(
         message=f"Retrieved {total_count} {entity_name_plural}",
-        objects=[schema_class.model_validate(e) for e in entities],
+        objects=response_objects,
         pagination={
             "total": total_count,
             "page": page,
@@ -692,14 +414,26 @@ def handle_list_entities(
         updated_before=updated_before,
         sort_by=sort_by,
         sort_order=sort_order,
-        sort_fields_map=get_entity_sort_fields(config["model_class"], config["parent_field"]),
+        sort_fields_map=get_entity_sort_fields(config["parent_field"]),
         metadata_func=metadata_func,
         parent_filter=parent_filter
     )
 
 
+def handle_bulk_delete(delete_data: BulkDeleteRequest, db: Session, user_id: str, config: dict):
+    """Generic handler for bulk delete operations."""
+    return bulk_delete_with_batches(
+        db=db,
+        user_id=user_id,
+        ids=delete_data.ids,
+        model_class=config["model_class"],
+        ownership_field="clerk_user_id",
+        message_template=f"Deleted {{0}} {config['entity_name_plural']}",
+    )
+
+
 def handle_get_entity(entity_id: int, db: Session, user_id: str, config: dict):
-    """Generic handler for getting a single entity."""
+    """Generic handler for getting a single entity by ID."""
     return get_entity_by_id(
         db=db,
         user_id=user_id,
@@ -711,7 +445,7 @@ def handle_get_entity(entity_id: int, db: Session, user_id: str, config: dict):
 
 
 def handle_update_entity(entity_id: int, entity_update, db: Session, user_id: str, config: dict):
-    """Generic handler for entity updates."""
+    """Generic handler for updating entities."""
     return update_entity_with_limit(
         db=db,
         user_id=user_id,
@@ -737,17 +471,4 @@ def handle_toggle_entity(entity_id: int, db: Session, user_id: str, config: dict
         schema_class=config["schema_class"],
         entity_name=config["entity_name"],
         active_limit=config["active_limit"]
-    )
-
-
-def handle_bulk_delete(delete_data: BulkDeleteRequest, db: Session, user_id: str, config: dict, batch_size: int):
-    """Generic handler for bulk delete operations."""
-    return bulk_delete_with_batches(
-        db=db,
-        user_id=user_id,
-        ids=delete_data.ids,
-        model_class=config["model_class"],
-        ownership_field="clerk_user_id",
-        message_template=f"Deleted {{0}} {config['entity_name_plural']}",
-        batch_size=batch_size
     )
