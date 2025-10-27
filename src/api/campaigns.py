@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 
 from src.core.database import get_db
 from src.core.settings import (
-    AD_CAMPAIGN_ACTIVE_LIMIT,
     DEFAULT_PAGE,
     MAX_PAGE_SIZE,
     PAGE_SIZE,
@@ -39,7 +38,6 @@ campaign_config = {
     "create_schema": AdCampaignCreate,
     "entity_name": "campaign",
     "entity_name_plural": "campaigns",
-    "active_limit": AD_CAMPAIGN_ACTIVE_LIMIT,
     "id_param": "campaign_id",
     "parent_field": "company_id",
     "parent_model": Company,
@@ -61,19 +59,18 @@ async def list_ad_campaigns(
     page: int = Query(DEFAULT_PAGE, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description=f"Items per page (max {MAX_PAGE_SIZE})"),
     search: Optional[str] = Query(None, description="Search by campaign title (case-insensitive, partial match)"),
-    is_active: Optional[bool] = Query(None, description="Filter by is_active status"),
     created_after: Optional[datetime] = Query(None, description="Filter by created date (after)"),
     created_before: Optional[datetime] = Query(None, description="Filter by created date (before)"),
     updated_after: Optional[datetime] = Query(None, description="Filter by updated date (after)"),
     updated_before: Optional[datetime] = Query(None, description="Filter by updated date (before)"),
-    sort_by: Optional[str] = Query("created", description="Sort by field: id, title, is_active, company_id, created, updated"),
+    sort_by: Optional[str] = Query("created", description="Sort by field: id, title, company_id, created, updated"),
     sort_order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
     """List all ad campaigns for the authenticated user with pagination, filters, and sorting"""
     return handle_list_entities(
-        db, user_id, campaign_config, page, page_size, search, is_active,
+        db, user_id, campaign_config, page, page_size, search, None,
         created_after, created_before, updated_after, updated_before,
         sort_by, sort_order, get_ad_campaigns_metadata, company_id
     )
@@ -105,12 +102,3 @@ async def bulk_delete_ad_campaigns(
 ):
     """Bulk delete ad campaigns"""
     return handle_bulk_delete(delete_data, db, user_id, campaign_config)
-
-@router.post("/ad_campaigns/{campaign_id}/toggle", response_model=SingleObjectResponse)
-async def toggle_ad_campaign_active(
-    campaign_id: int,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    """Toggle is_active status for an ad campaign"""
-    return handle_toggle_entity(campaign_id, db, user_id, campaign_config)

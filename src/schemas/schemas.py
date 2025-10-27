@@ -16,10 +16,9 @@ class EntityResponse(BaseModel):
 
 # ==================== Base Schemas for Reusability ====================
 
-class TitleActiveBase(BaseModel):
-    """Base schema for entities with title and is_active fields"""
+class TitleBase(BaseModel):
+    """Base schema for entities with title field"""
     title: str = Field(min_length=1, max_length=255)
-    is_active: bool
 
     @field_validator('title')
     @classmethod
@@ -31,17 +30,17 @@ class TitleActiveBase(BaseModel):
 
 # ==================== Create/Update Schemas ====================
 
-class CompanyCreate(TitleActiveBase):
+class CompanyCreate(TitleBase):
     """Schema for creating/updating companies. For create: omit id. For update: id ignored."""
     pass
 
 
-class AdCampaignCreate(TitleActiveBase):
+class AdCampaignCreate(TitleBase):
     """Schema for creating/updating ad campaigns. For create: omit id. For update: id ignored."""
     company_id: int
 
 
-class AdGroupCreate(TitleActiveBase):
+class AdGroupCreate(TitleBase):
     """Schema for creating/updating ad groups. For create: omit id. For update: id ignored."""
     ad_campaign_id: int
 
@@ -49,6 +48,35 @@ class AdGroupCreate(TitleActiveBase):
 class KeywordCreate(BaseModel):
     keyword: str
     trash: Optional[bool] = None
+
+
+# ==================== Project Schemas ====================
+
+class ProjectCreate(BaseModel):
+    """Schema for creating/updating projects. For create: omit id. For update: id ignored."""
+    name: str = Field(min_length=1, max_length=255)
+
+    @field_validator('name')
+    @classmethod
+    def name_must_not_be_blank(cls, v):
+        if not v.strip():
+            raise ValueError('Name must not be empty or contain only whitespace')
+        return v.strip()
+
+
+class ProjectEntityUpdate(BaseModel):
+    """Schema for updating project entities (companies, ad_campaigns, ad_groups)"""
+    company_ids: List[int] = Field(default_factory=list)
+    ad_campaign_ids: List[int] = Field(default_factory=list)
+    ad_group_ids: List[int] = Field(default_factory=list)
+
+
+# ==================== Settings Schemas ====================
+
+class SettingCreate(BaseModel):
+    """Schema for creating/updating settings"""
+    key: str = Field(min_length=1, max_length=255)
+    value: Optional[str] = Field(None, max_length=1000)
 
 
 # ==================== Column Mapping Schemas ====================
@@ -188,20 +216,29 @@ class AdGroup(EntityResponse, AdGroupCreate):
     pass
 
 
-# ==================== Response Schemas (Output - includes all fields) ====================
-
-class Company(EntityResponse, CompanyCreate):
-    """Company response"""
-    pass
-
-
-class AdCampaign(EntityResponse, AdCampaignCreate):
-    """Ad campaign response"""
-    pass
+class Project(EntityResponse):
+    """Project response"""
+    name: str = Field(validation_alias='title', serialization_alias='name')
+    
+    model_config = ConfigDict(from_attributes=True, exclude={"companies", "ad_campaigns", "ad_groups"}, populate_by_name=True)
 
 
-class AdGroup(EntityResponse, AdGroupCreate):
-    """Ad group response"""
+class ProjectWithEntities(EntityResponse):
+    """Project response with attached entities"""
+    name: str = Field(validation_alias='title', serialization_alias='name')
+    companies: List[Company] = Field(default_factory=list)
+    ad_campaigns: List[AdCampaign] = Field(default_factory=list)
+    ad_groups: List[AdGroup] = Field(default_factory=list)
+    
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+    
+    companies: List[Company] = []
+    ad_campaigns: List[AdCampaign] = []
+    ad_groups: List[AdGroup] = []
+
+
+class Setting(EntityResponse, SettingCreate):
+    """Setting response"""
     pass
 
 

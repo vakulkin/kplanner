@@ -20,7 +20,6 @@ def get_entity_sort_fields(parent_field: str = None):
     base_fields = {
         "id": "id",
         "title": "title",
-        "is_active": "is_active",
         "created": "created",
         "updated": "updated"
     }
@@ -172,7 +171,7 @@ def list_entities_with_filters(
     page: int,
     page_size: int,
     search: Optional[str],
-    is_active: Optional[bool],
+    is_active: Optional[bool],  # Kept for backward compatibility but ignored
     created_after: Optional[datetime],
     created_before: Optional[datetime],
     updated_after: Optional[datetime],
@@ -206,9 +205,7 @@ def list_entities_with_filters(
     if search:
         query = query.filter(model_class.title.ilike(f"%{search}%"))
 
-    # Add is_active filter
-    if is_active is not None:
-        query = query.filter(model_class.is_active == is_active)
+    # is_active filter removed - all entities are now visible
 
     # Apply date filters
     query = apply_date_filters(query, model_class, created_after, created_before, updated_after, updated_before)
@@ -242,41 +239,27 @@ def list_entities_with_filters(
     )
 
 
-def create_entity_with_limit(
+def create_entity(
     db: Session,
     user_id: str,
     entity_data,
     model_class,
     schema_class,
     entity_name: str,
-    active_limit: int = None,
     parent_field: str = None,
     parent_model = None,
     parent_name: str = None,
     **extra_fields
 ) -> SingleObjectResponse:
-    """Generic helper for creating entities with active limit checking and optional parent validation."""
+    """Generic helper for creating entities with optional parent validation."""
     # Validate parent if required
     if parent_field and parent_model:
         parent_id = getattr(entity_data, parent_field)
         validate_parent_entity(db, user_id, parent_id, parent_model, parent_name)
 
-    # Check if trying to create as active and limit is reached
-    is_active = entity_data.is_active
-    limit_message = None
-
-    if is_active and active_limit:
-        can_activate, limit_msg = check_active_limit(
-            db, user_id, model_class, active_limit, entity_name
-        )
-        if not can_activate:
-            is_active = False
-            limit_message = limit_msg
-
     # Build entity data
     entity_dict = {
         'title': entity_data.title,
-        'is_active': is_active,
         'clerk_user_id': user_id,
         **extra_fields
     }
@@ -291,8 +274,6 @@ def create_entity_with_limit(
     db.refresh(db_entity)
 
     message = f"{entity_name.capitalize()} created successfully"
-    if limit_message:
-        message = f"{entity_name.capitalize()} created as inactive. {limit_message}"
 
     return SingleObjectResponse(
         message=message,
@@ -313,7 +294,7 @@ def update_entity_with_limit(
     parent_model = None,
     parent_name: str = None
 ) -> SingleObjectResponse:
-    """Generic helper for updating entities with active limit checking and optional parent validation."""
+    """Generic helper for updating entities with optional parent validation."""
     # Get existing entity
     entity = db.query(model_class).filter(
         model_class.id == entity_id,
@@ -327,33 +308,16 @@ def update_entity_with_limit(
         parent_id = getattr(entity_update, parent_field)
         validate_parent_entity(db, user_id, parent_id, parent_model, parent_name)
 
-    # Check if trying to activate and limit is reached
-    is_active = entity_update.is_active
-    limit_message = None
-
-    if is_active and not entity.is_active and active_limit:  # Trying to activate
-        can_activate, limit_msg = check_active_limit(
-            db, user_id, model_class, active_limit, entity_name, exclude_id=entity_id
-        )
-        if not can_activate:
-            is_active = False
-            limit_message = limit_msg
-
     # Update entity
     entity.title = entity_update.title
-    entity.is_active = is_active
     if parent_field:
         setattr(entity, parent_field, getattr(entity_update, parent_field))
 
     db.commit()
     db.refresh(entity)
 
-    message = f"{entity_name.capitalize()} updated successfully"
-    if limit_message:
-        message = f"{entity_name.capitalize()} updated but kept inactive. {limit_message}"
-
     return SingleObjectResponse(
-        message=message,
+        message=f"{entity_name.capitalize()} updated successfully",
         object=schema_class.model_validate(entity)
     )
 
@@ -361,14 +325,13 @@ def update_entity_with_limit(
 # Generic endpoint handler functions
 def handle_create_entity(entity_data, db: Session, user_id: str, config: dict):
     """Generic handler for entity creation."""
-    return create_entity_with_limit(
+    return create_entity(
         db=db,
         user_id=user_id,
         entity_data=entity_data,
         model_class=config["model_class"],
         schema_class=config["schema_class"],
         entity_name=config["entity_name"],
-        active_limit=config["active_limit"],
         parent_field=config["parent_field"],
         parent_model=config["parent_model"],
         parent_name=config["parent_name"]
@@ -454,10 +417,9 @@ def handle_update_entity(entity_id: int, entity_update, db: Session, user_id: st
         model_class=config["model_class"],
         schema_class=config["schema_class"],
         entity_name=config["entity_name"],
-        active_limit=config["active_limit"],
-        parent_field=config["parent_field"],
-        parent_model=config["parent_model"],
-        parent_name=config["parent_name"]
+        parent_field=config.get("parent_field"),
+        parent_model=config.get("parent_model"),
+        parent_name=config.get("parent_name")
     )
 
 

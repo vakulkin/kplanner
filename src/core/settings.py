@@ -10,11 +10,6 @@ VERSION = "1.0.0"
 DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
 DEMO_USER_ID = "clerk_demo_user"
 
-# Active entity limits
-COMPANY_ACTIVE_LIMIT = 3
-AD_CAMPAIGN_ACTIVE_LIMIT = 5
-AD_GROUP_ACTIVE_LIMIT = 7
-
 # Pagination and batch processing constants
 DEFAULT_PAGE = 1
 PAGE_SIZE = 50  # Default page size

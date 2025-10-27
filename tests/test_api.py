@@ -98,8 +98,7 @@ def demo_user_id():
 def sample_company_data():
     """Sample company data for testing."""
     return {
-        "title": "Test Company",
-        "is_active": True
+        "title": "Test Company"
     }
 
 
@@ -108,8 +107,7 @@ def sample_campaign_data():
     """Sample campaign data for testing."""
     return {
         "title": "Test Campaign",
-        "company_id": 1,
-        "is_active": True
+        "company_id": 1
     }
 
 
@@ -118,8 +116,7 @@ def sample_ad_group_data():
     """Sample ad group data for testing."""
     return {
         "title": "Test Ad Group",
-        "ad_campaign_id": 1,
-        "is_active": True
+        "ad_campaign_id": 1
     }
 
 
@@ -195,8 +192,7 @@ def random_string(length: int = 10) -> str:
 def random_company_data() -> Dict[str, Any]:
     """Generate random company data."""
     return {
-        "title": fake.company() + " " + random_string(5),
-        "is_active": random.choice([True, False])
+        "title": fake.company() + " " + random_string(5)
     }
 
 
@@ -204,8 +200,7 @@ def random_campaign_data(company_id: int) -> Dict[str, Any]:
     """Generate random campaign data for a given company."""
     return {
         "title": fake.catch_phrase() + " " + random_string(5),
-        "company_id": company_id,
-        "is_active": random.choice([True, False])
+        "company_id": company_id
     }
 
 
@@ -213,8 +208,7 @@ def random_ad_group_data(campaign_id: int) -> Dict[str, Any]:
     """Generate random ad group data for a given campaign."""
     return {
         "title": " ".join(fake.words(nb=2, ext_word_list=['Ads', 'Group', 'Campaign', 'Marketing'])) + " " + random_string(3),
-        "ad_campaign_id": campaign_id,
-        "is_active": random.choice([True, False])
+        "ad_campaign_id": campaign_id
     }
 
 
@@ -364,7 +358,6 @@ class TestCompanyEndpoints:
 
         company = data["object"]
         assert company["title"] == sample_company_data["title"]
-        assert company["is_active"] == sample_company_data["is_active"]
         assert "id" in company
         assert "created" in company
         assert "updated" in company
@@ -376,7 +369,7 @@ class TestCompanyEndpoints:
         assert response.status_code == 422  # Validation error
 
         # Invalid title type
-        response = client.post("/companies", json={"title": 123, "is_active": True})
+        response = client.post("/companies", json={"title": 123})
         assert response.status_code == 422
 
     def test_list_companies_empty(self, client):
@@ -406,7 +399,7 @@ class TestCompanyEndpoints:
         """Test company listing with pagination."""
         # Create multiple companies
         for i in range(5):
-            company_data = {"title": f"Company {i+1}", "is_active": True}
+            company_data = {"title": f"Company {i+1}"}
             client.post("/companies", json=company_data)
 
         # Test page 1 with page_size 2
@@ -455,8 +448,7 @@ class TestCompanyEndpoints:
         """Test updating a company."""
         company_id = create_test_company["id"]
         update_data = {
-            "title": "Updated Company Name",
-            "is_active": False
+            "title": "Updated Company Name"
         }
 
         response = client.post(f"/companies/{company_id}/update", json=update_data)
@@ -465,29 +457,11 @@ class TestCompanyEndpoints:
         data = response.json()
         assert data["message"] == "Company updated successfully"
         assert data["object"]["title"] == update_data["title"]
-        assert data["object"]["is_active"] == update_data["is_active"]
 
     def test_update_company_not_found(self, client):
         """Test updating a non-existent company."""
-        update_data = {"title": "Updated Name", "is_active": True}
+        update_data = {"title": "Updated Name"}
         response = client.post("/companies/999/update", json=update_data)
-        assert response.status_code == 404
-
-    def test_toggle_company_active(self, client, create_test_company):
-        """Test toggling company active status."""
-        company_id = create_test_company["id"]
-        original_status = create_test_company["is_active"]
-
-        response = client.post(f"/companies/{company_id}/toggle")
-        assert response.status_code == 200
-
-        data = response.json()
-        assert "Company" in data["message"] and "successfully" in data["message"]
-        assert data["object"]["is_active"] != original_status
-
-    def test_toggle_company_not_found(self, client):
-        """Test toggling a non-existent company."""
-        response = client.post("/companies/999/toggle")
         assert response.status_code == 404
 
     def test_bulk_delete_companies(self, client, demo_user_id):
@@ -495,7 +469,7 @@ class TestCompanyEndpoints:
         # Create multiple companies
         company_ids = []
         for i in range(3):
-            company_data = {"title": f"Company {i+1}", "is_active": True}
+            company_data = {"title": f"Company {i+1}"}
             response = client.post("/companies", json=company_data)
             company_ids.append(response.json()["object"]["id"])
 
@@ -570,19 +544,19 @@ class TestAdCampaignEndpoints:
     def test_list_ad_campaigns_filter_by_company(self, client, demo_user_id):
         """Test filtering ad campaigns by company."""
         # Create company 1 and its campaigns
-        company1_data = {"title": "Company 1", "is_active": True}
+        company1_data = {"title": "Company 1"}
         company1 = client.post("/companies", json=company1_data).json()["object"]
 
-        campaign1_data = {"title": "Campaign 1", "company_id": company1["id"], "is_active": True}
-        campaign2_data = {"title": "Campaign 2", "company_id": company1["id"], "is_active": True}
+        campaign1_data = {"title": "Campaign 1", "company_id": company1["id"]}
+        campaign2_data = {"title": "Campaign 2", "company_id": company1["id"]}
         client.post("/ad_campaigns", json=campaign1_data)
         client.post("/ad_campaigns", json=campaign2_data)
 
         # Create company 2 and its campaign
-        company2_data = {"title": "Company 2", "is_active": True}
+        company2_data = {"title": "Company 2"}
         company2 = client.post("/companies", json=company2_data).json()["object"]
 
-        campaign3_data = {"title": "Campaign 3", "company_id": company2["id"], "is_active": True}
+        campaign3_data = {"title": "Campaign 3", "company_id": company2["id"]}
         client.post("/ad_campaigns", json=campaign3_data)
 
         # Filter by company 1
@@ -618,8 +592,7 @@ class TestAdCampaignEndpoints:
         campaign_id = create_test_campaign["id"]
         update_data = {
             "title": "Updated Campaign",
-            "company_id": create_test_campaign["company_id"],
-            "is_active": False
+            "company_id": create_test_campaign["company_id"]
         }
 
         response = client.post(f"/ad_campaigns/{campaign_id}/update", json=update_data)
@@ -627,18 +600,6 @@ class TestAdCampaignEndpoints:
 
         data = response.json()
         assert data["object"]["title"] == update_data["title"]
-        assert data["object"]["is_active"] == update_data["is_active"]
-
-    def test_toggle_ad_campaign(self, client, create_test_campaign):
-        """Test toggling ad campaign active status."""
-        campaign_id = create_test_campaign["id"]
-        original_status = create_test_campaign["is_active"]
-
-        response = client.post(f"/ad_campaigns/{campaign_id}/toggle")
-        assert response.status_code == 200
-
-        data = response.json()
-        assert data["object"]["is_active"] != original_status
 
     def test_bulk_delete_ad_campaigns(self, client, demo_user_id, create_test_company):
         """Test bulk deleting ad campaigns."""
@@ -647,8 +608,7 @@ class TestAdCampaignEndpoints:
         for i in range(3):
             campaign_data = {
                 "title": f"Campaign {i+1}",
-                "company_id": create_test_company["id"],
-                "is_active": True
+                "company_id": create_test_company["id"]
             }
             response = client.post("/ad_campaigns", json=campaign_data)
             campaign_ids.append(response.json()["object"]["id"])
@@ -745,16 +705,6 @@ class TestAdGroupEndpoints:
         data = response.json()
         assert data["object"]["title"] == update_data["title"]
 
-    def test_toggle_ad_group(self, client, create_test_ad_group):
-        """Test toggling ad group active status."""
-        ad_group_id = create_test_ad_group["id"]
-        original_status = create_test_ad_group["is_active"]
-
-        response = client.post(f"/ad_groups/{ad_group_id}/toggle")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["object"]["is_active"] != original_status
-
     def test_bulk_delete_ad_groups(self, client, demo_user_id, create_test_campaign):
         """Test bulk deleting ad groups."""
         # Create multiple ad groups
@@ -762,8 +712,7 @@ class TestAdGroupEndpoints:
         for i in range(3):
             ad_group_data = {
                 "title": f"Ad Group {i+1}",
-                "ad_campaign_id": create_test_campaign["id"],
-                "is_active": True
+                "ad_campaign_id": create_test_campaign["id"]
             }
             response = client.post("/ad_groups", json=ad_group_data)
             ad_group_ids.append(response.json()["object"]["id"])
@@ -782,7 +731,7 @@ class TestColumnMappingsEndpoints:
     def test_toggle_column_mapping_create(self, client, create_test_company):
         """Test creating a column mapping via create action."""
         # Create a second company
-        company2_data = {"title": "Test Company 2", "is_active": True}
+        company2_data = {"title": "Test Company 2"}
         response = client.post("/companies", json=company2_data)
         assert response.status_code == 201
         company2 = response.json()["object"]
@@ -1251,12 +1200,11 @@ class TestKeywordEndpoints:
         }
         client.post("/keywords/bulk", json=bulk_data3)
 
-        # Test that keywords are listed with active entity relations
-        # Now the endpoint automatically uses all active entities (no need to pass IDs)
+        # Test that keywords are listed without project filter (should return all keywords)
         response = client.get("/keywords")
         assert response.status_code == 200
         data = response.json()
-        # All 3 keywords should be returned with their relations to active entities
+        # All 3 keywords should be returned
         assert len(data["objects"]) == 3
         
         # Verify each keyword has proper relations
@@ -1279,6 +1227,30 @@ class TestKeywordEndpoints:
         adgroup_kw = keywords_by_name["adgroup keyword"]
         assert str(create_test_ad_group['id']) in adgroup_kw["relations"]["ad_groups"]
         assert adgroup_kw["relations"]["ad_groups"][str(create_test_ad_group['id'])] is not None
+
+        # Test filtering by project (create a project and attach entities)
+        project_data = {"name": "Test Project"}
+        project = client.post("/projects", json=project_data).json()["object"]
+
+        # Attach only company and campaign to project
+        attach_data = {
+            "company_ids": [create_test_company["id"]],
+            "ad_campaign_ids": [create_test_campaign["id"]],
+            "ad_group_ids": []  # Don't attach ad group
+        }
+        client.post(f"/projects/{project['id']}/entities", json=attach_data)
+
+        # Filter keywords by project - should only return keywords attached to company and campaign
+        response = client.get(f"/keywords?project_id={project['id']}")
+        assert response.status_code == 200
+        data = response.json()
+        # Should return 2 keywords (company and campaign keywords, but not ad group keyword)
+        assert len(data["objects"]) == 2
+        
+        keywords_by_name = {kw["keyword"]: kw for kw in data["objects"]}
+        assert "company keyword" in keywords_by_name
+        assert "campaign keyword" in keywords_by_name
+        assert "adgroup keyword" not in keywords_by_name
 
     def test_get_keyword(self, client, create_test_keyword):
         """Test getting a single keyword."""
@@ -2365,11 +2337,6 @@ class TestConcurrentOperations:
             response = client.post(f"/companies/{company['id']}/update", json=update_data)
             operations.append(("update_company", response.status_code))
 
-        # Toggle status
-        for company in companies[:2]:
-            response = client.post(f"/companies/{company['id']}/toggle")
-            operations.append(("toggle_company", response.status_code))
-
         # All operations should succeed
         for op_name, status in operations:
             assert status == 200 or status == 201, f"{op_name} failed with status {status}"
@@ -2464,281 +2431,20 @@ class TestBoundaryConditions:
         assert response.status_code == 201
 
 
-class TestActiveLimits:
-    """Test active entity limits enforcement."""
-
-    def test_company_active_limit_create(self, client):
-        """Test that creating more than 3 active companies enforces the limit."""
-        # Create 3 active companies - should all succeed as active
-        companies = []
-        for i in range(3):
-            data = {"title": f"Active Company {i+1}", "is_active": True}
-            response = client.post("/companies", json=data)
-            assert response.status_code == 201
-            result = response.json()["object"]
-            assert result["is_active"] == True
-            assert "successfully" in response.json()["message"]
-            companies.append(result)
-        
-        # Try to create 4th active company - should be created as inactive
-        data = {"title": "Fourth Active Company", "is_active": True}
-        response = client.post("/companies", json=data)
-        assert response.status_code == 201
-        result = response.json()["object"]
-        assert result["is_active"] == False  # Forced to inactive
-        assert "Maximum 3 active" in response.json()["message"]
-        
-        # Create inactive company - should succeed
-        data = {"title": "Inactive Company", "is_active": False}
-        response = client.post("/companies", json=data)
-        assert response.status_code == 201
-        result = response.json()["object"]
-        assert result["is_active"] == False
-
-    def test_company_active_limit_toggle(self, client):
-        """Test that toggling companies respects the active limit."""
-        # Create 3 active companies
-        active_companies = []
-        for i in range(3):
-            data = {"title": f"Active Company {i+1}", "is_active": True}
-            response = client.post("/companies", json=data)
-            active_companies.append(response.json()["object"])
-        
-        # Create 1 inactive company
-        data = {"title": "Inactive Company", "is_active": False}
-        response = client.post("/companies", json=data)
-        inactive_company = response.json()["object"]
-        
-        # Try to toggle inactive company to active - should fail
-        response = client.post(f"/companies/{inactive_company['id']}/toggle")
-        assert response.status_code == 200
-        result = response.json()["object"]
-        assert result["is_active"] == False  # Still inactive
-        assert "Maximum 3 active" in response.json()["message"]
-        
-        # Toggle one active company to inactive
-        response = client.post(f"/companies/{active_companies[0]['id']}/toggle")
-        assert response.status_code == 200
-        result = response.json()["object"]
-        assert result["is_active"] == False
-        assert "deactivated successfully" in response.json()["message"]
-        
-        # Now toggle the previously inactive company - should succeed
-        response = client.post(f"/companies/{inactive_company['id']}/toggle")
-        assert response.status_code == 200
-        result = response.json()["object"]
-        assert result["is_active"] == True
-        assert "activated successfully" in response.json()["message"]
-
-    def test_company_active_limit_update(self, client):
-        """Test that updating companies respects the active limit."""
-        # Create 3 active companies
-        for i in range(3):
-            data = {"title": f"Active Company {i+1}", "is_active": True}
-            client.post("/companies", json=data)
-        
-        # Create 1 inactive company
-        data = {"title": "Inactive Company", "is_active": False}
-        response = client.post("/companies", json=data)
-        inactive_company = response.json()["object"]
-        
-        # Try to update inactive company to active - should fail
-        update_data = {"title": "Updated Company", "is_active": True}
-        response = client.post(f"/companies/{inactive_company['id']}/update", json=update_data)
-        assert response.status_code == 200
-        result = response.json()["object"]
-        assert result["is_active"] == False  # Still inactive
-        assert result["title"] == "Updated Company"  # Title updated
-        assert "Maximum 3 active" in response.json()["message"]
-
-    def test_ad_campaign_active_limit_create(self, client, create_test_company):
-        """Test that creating more than 5 active campaigns enforces the limit."""
-        # Create 5 active campaigns
-        campaigns = []
-        for i in range(5):
-            data = {
-                "title": f"Active Campaign {i+1}",
-                "is_active": True,
-                "company_id": create_test_company["id"]
-            }
-            response = client.post("/ad_campaigns", json=data)
-            assert response.status_code == 201
-            result = response.json()["object"]
-            assert result["is_active"] == True
-            campaigns.append(result)
-        
-        # Try to create 6th active campaign - should be created as inactive
-        data = {
-            "title": "Sixth Active Campaign",
-            "is_active": True,
-            "company_id": create_test_company["id"]
-        }
-        response = client.post("/ad_campaigns", json=data)
-        assert response.status_code == 201
-        result = response.json()["object"]
-        assert result["is_active"] == False
-        assert "Maximum 5 active" in response.json()["message"]
-
-    def test_ad_campaign_active_limit_toggle(self, client, create_test_company):
-        """Test that toggling campaigns respects the active limit."""
-        # Create 5 active campaigns
-        for i in range(5):
-            data = {
-                "title": f"Active Campaign {i+1}",
-                "is_active": True,
-                "company_id": create_test_company["id"]
-            }
-            client.post("/ad_campaigns", json=data)
-        
-        # Create inactive campaign
-        data = {
-            "title": "Inactive Campaign",
-            "is_active": False,
-            "company_id": create_test_company["id"]
-        }
-        response = client.post("/ad_campaigns", json=data)
-        inactive_campaign = response.json()["object"]
-        
-        # Try to toggle to active - should fail
-        response = client.post(f"/ad_campaigns/{inactive_campaign['id']}/toggle")
-        assert response.status_code == 200
-        result = response.json()["object"]
-        assert result["is_active"] == False
-        assert "Maximum 5 active" in response.json()["message"]
-
-    def test_ad_group_active_limit_create(self, client, create_test_campaign):
-        """Test that creating more than 7 active ad groups enforces the limit."""
-        # Create 7 active ad groups
-        ad_groups = []
-        for i in range(7):
-            data = {
-                "title": f"Active Ad Group {i+1}",
-                "is_active": True,
-                "ad_campaign_id": create_test_campaign["id"]
-            }
-            response = client.post("/ad_groups", json=data)
-            assert response.status_code == 201
-            result = response.json()["object"]
-            assert result["is_active"] == True
-            ad_groups.append(result)
-        
-        # Try to create 8th active ad group - should be created as inactive
-        data = {
-            "title": "Eighth Active Ad Group",
-            "is_active": True,
-            "ad_campaign_id": create_test_campaign["id"]
-        }
-        response = client.post("/ad_groups", json=data)
-        assert response.status_code == 201
-        result = response.json()["object"]
-        assert result["is_active"] == False
-        assert "Maximum 7 active" in response.json()["message"]
-
-    def test_ad_group_active_limit_toggle(self, client, create_test_campaign):
-        """Test that toggling ad groups respects the active limit."""
-        # Create 7 active ad groups
-        for i in range(7):
-            data = {
-                "title": f"Active Ad Group {i+1}",
-                "is_active": True,
-                "ad_campaign_id": create_test_campaign["id"]
-            }
-            client.post("/ad_groups", json=data)
-        
-        # Create inactive ad group
-        data = {
-            "title": "Inactive Ad Group",
-            "is_active": False,
-            "ad_campaign_id": create_test_campaign["id"]
-        }
-        response = client.post("/ad_groups", json=data)
-        inactive_ad_group = response.json()["object"]
-        
-        # Try to toggle to active - should fail
-        response = client.post(f"/ad_groups/{inactive_ad_group['id']}/toggle")
-        assert response.status_code == 200
-        result = response.json()["object"]
-        assert result["is_active"] == False
-        assert "Maximum 7 active" in response.json()["message"]
-
-    def test_mixed_active_inactive_operations(self, client, create_test_company, create_test_campaign):
-        """Test mixed operations with active and inactive entities."""
-        # Create 3 active companies
-        for i in range(3):
-            data = {"title": f"Company {i+1}", "is_active": True}
-            client.post("/companies", json=data)
-        
-        # Create 5 active campaigns
-        for i in range(5):
-            data = {
-                "title": f"Campaign {i+1}",
-                "is_active": True,
-                "company_id": create_test_company["id"]
-            }
-            client.post("/ad_campaigns", json=data)
-        
-        # Create 7 active ad groups
-        for i in range(7):
-            data = {
-                "title": f"Ad Group {i+1}",
-                "is_active": True,
-                "ad_campaign_id": create_test_campaign["id"]
-            }
-            client.post("/ad_groups", json=data)
-        
-        # Now create more entities as inactive (should work)
-        for i in range(5):
-            data = {"title": f"Extra Company {i+1}", "is_active": False}
-            response = client.post("/companies", json=data)
-            assert response.status_code == 201
-        
-        for i in range(5):
-            data = {
-                "title": f"Extra Campaign {i+1}",
-                "is_active": False,
-                "company_id": create_test_company["id"]
-            }
-            response = client.post("/ad_campaigns", json=data)
-            assert response.status_code == 201
-        
-        for i in range(5):
-            data = {
-                "title": f"Extra Ad Group {i+1}",
-                "is_active": False,
-                "ad_campaign_id": create_test_campaign["id"]
-            }
-            response = client.post("/ad_groups", json=data)
-            assert response.status_code == 201
-        
-        # Verify we can list all entities
-        response = client.get("/companies")
-        assert response.status_code == 200
-        assert response.json()["pagination"]["total"] >= 8  # 3 active + 5 inactive
-        
-        response = client.get("/ad_campaigns")
-        assert response.status_code == 200
-        assert response.json()["pagination"]["total"] >= 10  # 5 active + 5 inactive
-        
-        response = client.get("/ad_groups")
-        assert response.status_code == 200
-        assert response.json()["pagination"]["total"] >= 12  # 7 active + 5 inactive
-
-
 class TestPropertyBasedTesting:
     """Property-based tests using Hypothesis."""
 
     @given(
-        title=st.text(min_size=1, max_size=100),
-        is_active=st.booleans()
+        title=st.text(min_size=1, max_size=100)
     )
     @settings(max_examples=50, phases=[Phase.generate, Phase.shrink], suppress_health_check=[HealthCheck.function_scoped_fixture])
-    def test_company_creation_properties(self, client, title, is_active):
+    def test_company_creation_properties(self, client, title):
         """Property-based test for company creation."""
         # Skip empty titles as they're invalid
         if not title.strip():
             return
 
-        data = {"title": title, "is_active": is_active}
+        data = {"title": title}
         response = client.post("/companies", json=data)
 
         if len(title.strip()) > 255:  # Assuming DB limit
@@ -2747,14 +2453,6 @@ class TestPropertyBasedTesting:
             assert response.status_code == 201
             result = response.json()["object"]
             assert result["title"] == title.strip()  # API strips whitespace
-            # Note: is_active might be False even if requested True due to active limit (max 3)
-            # The API will set it to False and return a message about the limit
-            if is_active and not result["is_active"]:
-                # Check that message mentions the limit
-                assert "Maximum 3 active" in response.json()["message"]
-            elif not is_active:
-                # If we requested inactive, it should be inactive
-                assert result["is_active"] == False
 
     @given(
         keywords=st.lists(st.text(min_size=1, max_size=50), min_size=1, max_size=20),
@@ -2976,6 +2674,384 @@ class TestComplexScenarios:
         for keyword in created_keywords:
             response = client.get(f"/keywords/{keyword['id']}")
             assert response.status_code == 200
+
+
+class TestProjectEndpoints:
+    """Test all project-related endpoints."""
+
+    def test_create_project(self, client, demo_user_id):
+        """Test creating a project."""
+        project_data = {"name": "Test Project"}
+        response = client.post("/projects", json=project_data)
+        assert response.status_code == 201
+
+        data = response.json()
+        assert data["message"] == "Project created successfully"
+        assert "object" in data
+
+        project = data["object"]
+        assert project["name"] == project_data["name"]
+        assert "id" in project
+        assert "created" in project
+        assert "updated" in project
+
+    def test_create_project_invalid_data(self, client):
+        """Test creating a project with invalid data."""
+        # Missing required fields
+        response = client.post("/projects", json={})
+        assert response.status_code == 422  # Validation error
+
+        # Invalid title type
+        response = client.post("/projects", json={"title": 123})
+        assert response.status_code == 422
+
+    def test_list_projects_empty(self, client):
+        """Test listing projects when none exist."""
+        response = client.get("/projects")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["message"] == "Retrieved 0 projects"
+        assert data["objects"] == []
+        assert data["pagination"]["total"] == 0
+
+    def test_list_projects_with_data(self, client, demo_user_id):
+        """Test listing projects with existing data."""
+        # Create a project
+        project_data = {"name": "Test Project"}
+        client.post("/projects", json=project_data)
+
+        response = client.get("/projects")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert len(data["objects"]) == 1
+        assert data["objects"][0]["name"] == project_data["name"]
+
+    def test_list_projects_pagination(self, client, demo_user_id):
+        """Test project listing with pagination."""
+        # Create multiple projects
+        for i in range(5):
+            project_data = {"name": f"Project {i+1}"}
+            client.post("/projects", json=project_data)
+
+        # Test page 1 with page_size 2
+        response = client.get("/projects?page=1&page_size=2")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["objects"]) == 2
+        assert data["pagination"]["total"] == 5
+        assert data["pagination"]["page"] == 1
+        assert data["pagination"]["page_size"] == 2
+        assert data["pagination"]["total_pages"] == 3
+
+        # Test page 2
+        response = client.get("/projects?page=2&page_size=2")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["objects"]) == 2
+        assert data["pagination"]["page"] == 2
+
+        # Test page 3 (last page)
+        response = client.get("/projects?page=3&page_size=2")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["objects"]) == 1
+        assert data["pagination"]["page"] == 3
+
+    def test_get_project(self, client, demo_user_id):
+        """Test getting a single project."""
+        # Create a project
+        project_data = {"name": "Test Project"}
+        create_response = client.post("/projects", json=project_data)
+        project_id = create_response.json()["object"]["id"]
+
+        response = client.get(f"/projects/{project_id}")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["object"]["id"] == project_id
+        assert data["object"]["name"] == project_data["name"]
+
+    def test_get_project_not_found(self, client):
+        """Test getting a non-existent project."""
+        response = client.get("/projects/999")
+        assert response.status_code == 404
+
+    def test_update_project(self, client, demo_user_id):
+        """Test updating a project."""
+        # Create a project
+        project_data = {"name": "Original Project"}
+        create_response = client.post("/projects", json=project_data)
+        project_id = create_response.json()["object"]["id"]
+
+        update_data = {"name": "Updated Project"}
+        response = client.post(f"/projects/{project_id}/update", json=update_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["message"] == "Project updated successfully"
+        assert data["object"]["name"] == update_data["name"]
+
+    def test_update_project_not_found(self, client):
+        """Test updating a non-existent project."""
+        update_data = {"name": "Updated Project"}
+        response = client.post("/projects/999/update", json=update_data)
+        assert response.status_code == 404
+
+    def test_delete_project(self, client, demo_user_id):
+        """Test deleting a project."""
+        # Create a project
+        project_data = {"name": "Project to Delete"}
+        response = client.post("/projects", json=project_data)
+        assert response.status_code == 201
+        project = response.json()["object"]
+
+        # Delete the project
+        response = client.post(f"/projects/{project['id']}/delete")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert "Project deleted successfully" in data["message"]
+        assert data["object"]["id"] == project["id"]
+
+        # Verify project is gone
+        response = client.get(f"/projects/{project['id']}")
+        assert response.status_code == 404
+
+    def test_delete_project_not_found(self, client):
+        """Test deleting a non-existent project."""
+        response = client.post("/projects/999/delete")
+        assert response.status_code == 404
+
+    def test_attach_entities_to_project(self, client, demo_user_id):
+        """Test attaching entities to a project."""
+        # Create entities
+        company_data = {"title": "Test Company"}
+        company = client.post("/companies", json=company_data).json()["object"]
+
+        campaign_data = {"title": "Test Campaign", "company_id": company["id"]}
+        campaign = client.post("/ad_campaigns", json=campaign_data).json()["object"]
+
+        ad_group_data = {"title": "Test Ad Group", "ad_campaign_id": campaign["id"]}
+        ad_group = client.post("/ad_groups", json=ad_group_data).json()["object"]
+
+        # Create project
+        project_data = {"name": "Test Project"}
+        project = client.post("/projects", json=project_data).json()["object"]
+
+        # Attach entities to project
+        attach_data = {
+            "company_ids": [company["id"]],
+            "ad_campaign_ids": [campaign["id"]],
+            "ad_group_ids": [ad_group["id"]]
+        }
+        response = client.post(f"/projects/{project['id']}/entities", json=attach_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert "Project entities updated successfully" in data["message"]
+
+        # Verify entities are attached by getting the project
+        response = client.get(f"/projects/{project['id']}")
+        assert response.status_code == 200
+        project_data = response.json()["object"]
+
+        assert len(project_data["companies"]) == 1
+        assert len(project_data["ad_campaigns"]) == 1
+        assert len(project_data["ad_groups"]) == 1
+
+    def test_bulk_delete_projects(self, client, demo_user_id):
+        """Test bulk deleting projects."""
+        # Create multiple projects
+        project_ids = []
+        for i in range(3):
+            project_data = {"name": f"Project {i+1}"}
+            response = client.post("/projects", json=project_data)
+            project_ids.append(response.json()["object"]["id"])
+
+        # Delete first two projects
+        delete_data = {"ids": project_ids[:2]}
+        response = client.post("/projects/bulk-delete", json=delete_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert "Successfully deleted 2 projects" in data["message"]
+        assert data["deleted"] == 2
+        assert data["requested"] == 2
+
+        # Verify remaining project still exists
+        response = client.get(f"/projects/{project_ids[2]}")
+        assert response.status_code == 200
+
+        # Verify deleted projects are gone
+        for deleted_id in project_ids[:2]:
+            response = client.get(f"/projects/{deleted_id}")
+            assert response.status_code == 404
+
+    def test_bulk_delete_projects_empty_list(self, client):
+        """Test bulk deleting with empty ID list."""
+        delete_data = {"ids": []}
+        response = client.post("/projects/bulk-delete", json=delete_data)
+        assert response.status_code == 400  # Should return 400 for empty ids
+
+
+class TestSettingsEndpoints:
+    """Test all settings-related endpoints."""
+
+    def test_create_setting(self, client, demo_user_id):
+        """Test creating a setting."""
+        setting_data = {"key": "test_key", "value": "test_value"}
+        response = client.post("/settings", json=setting_data)
+        assert response.status_code == 201
+
+        data = response.json()
+        assert "Setting" in data["message"] and "successfully" in data["message"]
+        assert "object" in data
+
+        setting = data["object"]
+        assert setting["key"] == setting_data["key"]
+        assert setting["value"] == setting_data["value"]
+        assert "id" in setting
+
+    def test_create_setting_invalid_data(self, client):
+        """Test creating a setting with invalid data."""
+        # Missing required fields
+        response = client.post("/settings", json={})
+        assert response.status_code == 422  # Validation error
+
+        # Invalid key type
+        response = client.post("/settings", json={"key": 123, "value": "test"})
+        assert response.status_code == 422
+
+    def test_update_setting_same_key(self, client, demo_user_id):
+        """Test updating a setting with the same key."""
+        # Create initial setting
+        setting_data = {"key": "test_key", "value": "initial_value"}
+        client.post("/settings", json=setting_data)
+
+        # Update with same key
+        update_data = {"key": "test_key", "value": "updated_value"}
+        response = client.post("/settings", json=update_data)
+        assert response.status_code == 201
+
+        data = response.json()
+        assert "updated successfully" in data["message"]
+        assert data["object"]["value"] == update_data["value"]
+
+    def test_list_settings_empty(self, client):
+        """Test listing settings when none exist."""
+        response = client.get("/settings")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["message"] == "Retrieved 0 settings"
+        assert data["objects"] == []
+        assert data["pagination"]["total"] == 0
+
+    def test_list_settings_with_data(self, client, demo_user_id):
+        """Test listing settings with existing data."""
+        # Create a setting
+        setting_data = {"key": "test_key", "value": "test_value"}
+        client.post("/settings", json=setting_data)
+
+        response = client.get("/settings")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert len(data["objects"]) == 1
+        assert data["objects"][0]["key"] == setting_data["key"]
+        assert data["objects"][0]["value"] == setting_data["value"]
+
+    def test_get_setting(self, client, demo_user_id):
+        """Test getting a single setting."""
+        # Create a setting
+        setting_data = {"key": "test_key", "value": "test_value"}
+        create_response = client.post("/settings", json=setting_data)
+        setting_id = create_response.json()["object"]["id"]
+
+        response = client.get(f"/settings/{setting_id}")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["object"]["id"] == setting_id
+        assert data["object"]["key"] == setting_data["key"]
+        assert data["object"]["value"] == setting_data["value"]
+
+    def test_get_setting_not_found(self, client):
+        """Test getting a non-existent setting."""
+        response = client.get("/settings/999")
+        assert response.status_code == 404
+
+    def test_get_setting_by_key(self, client, demo_user_id):
+        """Test getting a setting by key."""
+        # Create a setting
+        setting_data = {"key": "test_key", "value": "test_value"}
+        client.post("/settings", json=setting_data)
+
+        response = client.get("/settings/key/test_key")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["object"]["key"] == setting_data["key"]
+        assert data["object"]["value"] == setting_data["value"]
+
+    def test_get_setting_by_key_not_found(self, client):
+        """Test getting a setting by non-existent key."""
+        response = client.get("/settings/key/non_existent_key")
+        assert response.status_code == 404
+
+    def test_update_setting_by_key(self, client, demo_user_id):
+        """Test updating a setting by key."""
+        # Create a setting
+        setting_data = {"key": "test_key", "value": "initial_value"}
+        client.post("/settings", json=setting_data)
+
+        update_data = {"key": "test_key", "value": "updated_value"}
+        response = client.post("/settings/key/test_key", json=update_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert "Setting updated successfully" in data["message"]
+        assert data["object"]["value"] == update_data["value"]
+
+    def test_update_setting_by_key_not_found(self, client):
+        """Test creating a setting by key when it doesn't exist."""
+        update_data = {"key": "non_existent_key", "value": "updated_value"}
+        response = client.post("/settings/key/non_existent_key", json=update_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert "Setting created successfully" in data["message"]
+        assert data["object"]["value"] == update_data["value"]
+
+    def test_bulk_delete_settings(self, client, demo_user_id):
+        """Test bulk deleting settings."""
+        # Create multiple settings
+        setting_ids = []
+        for i in range(3):
+            setting_data = {"key": f"test_key_{i}", "value": f"test_value_{i}"}
+            response = client.post("/settings", json=setting_data)
+            setting_ids.append(response.json()["object"]["id"])
+
+        # Delete first two settings
+        delete_data = {"ids": setting_ids[:2]}
+        response = client.post("/settings/bulk/delete", json=delete_data)
+        assert response.status_code == 200
+
+        data = response.json()
+        assert "Deleted 2 settings" in data["message"]
+        assert data["deleted"] == 2
+        assert data["requested"] == 2
+
+        # Verify remaining setting still exists
+        response = client.get(f"/settings/{setting_ids[2]}")
+        assert response.status_code == 200
+
+        # Verify deleted settings are gone
+        for deleted_id in setting_ids[:2]:
+            response = client.get(f"/settings/{deleted_id}")
+            assert response.status_code == 404
 
 
 if __name__ == "__main__":

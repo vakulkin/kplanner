@@ -45,24 +45,37 @@ router = APIRouter()
 
 
 # Helper functions for keyword listing
-def _get_active_entity_ids(db: Session, user_id: str) -> tuple[list[int], list[int], list[int]]:
-    """Get IDs of all active entities for the user using a single optimized query per entity type."""
-    # Use scalar subqueries to get just the IDs efficiently
-    company_ids = db.query(Company.id).filter(
-        Company.clerk_user_id == user_id,
-        Company.is_active == True
+def _get_project_entity_ids(db: Session, user_id: str, project_id: Optional[int] = None) -> tuple[list[int], list[int], list[int]]:
+    """Get IDs of entities attached to a specific project, or all entities if no project specified."""
+    if project_id is None:
+        # Return all entities for the user
+        from src.models.models import Company, AdCampaign, AdGroup
+        
+        company_ids = db.query(Company.id).filter(Company.clerk_user_id == user_id).all()
+        campaign_ids = db.query(AdCampaign.id).filter(AdCampaign.clerk_user_id == user_id).all()
+        adgroup_ids = db.query(AdGroup.id).filter(AdGroup.clerk_user_id == user_id).all()
+        
+        return (
+            [c[0] for c in company_ids],
+            [c[0] for c in campaign_ids],
+            [a[0] for a in adgroup_ids]
+        )
+    
+    # Get entities attached to the specified project
+    from src.models.models import ProjectCompany, ProjectAdCampaign, ProjectAdGroup
+    
+    company_ids = db.query(ProjectCompany.company_id).filter(
+        ProjectCompany.project_id == project_id
     ).all()
-
-    campaign_ids = db.query(AdCampaign.id).filter(
-        AdCampaign.clerk_user_id == user_id,
-        AdCampaign.is_active == True
+    
+    campaign_ids = db.query(ProjectAdCampaign.ad_campaign_id).filter(
+        ProjectAdCampaign.project_id == project_id
     ).all()
-
-    adgroup_ids = db.query(AdGroup.id).filter(
-        AdGroup.clerk_user_id == user_id,
-        AdGroup.is_active == True
+    
+    adgroup_ids = db.query(ProjectAdGroup.ad_group_id).filter(
+        ProjectAdGroup.project_id == project_id
     ).all()
-
+    
     return (
         [c[0] for c in company_ids],
         [c[0] for c in campaign_ids],
@@ -556,6 +569,7 @@ async def bulk_upsert_keyword_relations(
 
 @router.get("/keywords", response_model=MultipleObjectsResponse)
 async def list_keywords(
+    project_id: Optional[int] = Query(None, description="Filter keywords by project (show only keywords attached to entities in this project). If not provided, show all keywords."),
     page: int = Query(DEFAULT_PAGE, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description=f"Items per page (max {MAX_PAGE_SIZE})"),
     only_attached: bool = Query(False, description="Show only keywords attached to at least one entity"),
@@ -579,11 +593,30 @@ async def list_keywords(
 ):
     from sqlalchemy import or_, exists, and_, case, func, select
 
-    # Get active entity IDs efficiently (just IDs, not full objects)
-    company_id_list, campaign_id_list, adgroup_id_list = _get_active_entity_ids(db, user_id)
+    # Get entity IDs based on project filter (or all entities if no project specified)
+    company_id_list, campaign_id_list, adgroup_id_list = _get_project_entity_ids(db, user_id, project_id)
 
     # Build base query - start with user filter
     query = db.query(Keyword).filter(Keyword.clerk_user_id == user_id)
+
+    # If project_id is specified, only include keywords that have relations to the project's entities
+    if project_id:
+        query = query.filter(
+            or_(
+                exists().where(
+                    CompanyKeyword.keyword_id == Keyword.id,
+                    CompanyKeyword.company_id.in_(company_id_list) if company_id_list else False
+                ),
+                exists().where(
+                    AdCampaignKeyword.keyword_id == Keyword.id,
+                    AdCampaignKeyword.ad_campaign_id.in_(campaign_id_list) if campaign_id_list else False
+                ),
+                exists().where(
+                    AdGroupKeyword.keyword_id == Keyword.id,
+                    AdGroupKeyword.ad_group_id.in_(adgroup_id_list) if adgroup_id_list else False
+                )
+            )
+        )
 
     # Add search filter if provided
     if search:
@@ -721,8 +754,15 @@ async def list_keywords(
 
     filters, sorting = get_keywords_metadata()
 
+    # Update filters to include project info
+    filters["project_id"] = project_id
+
+    message = f"Retrieved {total_count} keywords"
+    if project_id:
+        message += f" for project {project_id}"
+
     return MultipleObjectsResponse(
-        message=f"Retrieved {total_count} keywords",
+        message=message,
         objects=result_objects,
         pagination={
             "total": total_count,

@@ -163,8 +163,7 @@ def get_active_column_mappings(
             exists().where(
                 and_(
                     Company.id == ColumnMapping.source_company_id,
-                    Company.clerk_user_id == clerk_user_id,
-                    Company.is_active == True
+                    Company.clerk_user_id == clerk_user_id
                 )
             )
         ),
@@ -173,8 +172,7 @@ def get_active_column_mappings(
             exists().where(
                 and_(
                     AdCampaign.id == ColumnMapping.source_ad_campaign_id,
-                    AdCampaign.clerk_user_id == clerk_user_id,
-                    AdCampaign.is_active == True
+                    AdCampaign.clerk_user_id == clerk_user_id
                 )
             )
         ),
@@ -183,8 +181,7 @@ def get_active_column_mappings(
             exists().where(
                 and_(
                     AdGroup.id == ColumnMapping.source_ad_group_id,
-                    AdGroup.clerk_user_id == clerk_user_id,
-                    AdGroup.is_active == True
+                    AdGroup.clerk_user_id == clerk_user_id
                 )
             )
         )
@@ -197,8 +194,7 @@ def get_active_column_mappings(
             exists().where(
                 and_(
                     Company.id == ColumnMapping.target_company_id,
-                    Company.clerk_user_id == clerk_user_id,
-                    Company.is_active == True
+                    Company.clerk_user_id == clerk_user_id
                 )
             )
         ),
@@ -207,8 +203,7 @@ def get_active_column_mappings(
             exists().where(
                 and_(
                     AdCampaign.id == ColumnMapping.target_ad_campaign_id,
-                    AdCampaign.clerk_user_id == clerk_user_id,
-                    AdCampaign.is_active == True
+                    AdCampaign.clerk_user_id == clerk_user_id
                 )
             )
         ),
@@ -217,8 +212,7 @@ def get_active_column_mappings(
             exists().where(
                 and_(
                     AdGroup.id == ColumnMapping.target_ad_group_id,
-                    AdGroup.clerk_user_id == clerk_user_id,
-                    AdGroup.is_active == True
+                    AdGroup.clerk_user_id == clerk_user_id
                 )
             )
         )

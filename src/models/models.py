@@ -84,12 +84,12 @@ class Company(Base):
     id = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
     clerk_user_id = Column(String(255), nullable=False, index=True)
-    is_active = Column(Boolean, default=True, nullable=False)
     created = Column(TIMESTAMP, server_default=func.current_timestamp())
     updated = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
     
     ad_campaigns = relationship("AdCampaign", back_populates="company", cascade="all, delete-orphan")
     keywords = relationship("Keyword", secondary="company_keyword", back_populates="companies")
+    projects = relationship("Project", secondary="project_company", back_populates="companies")
 
 
 class AdCampaign(Base):
@@ -98,7 +98,6 @@ class AdCampaign(Base):
     id = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
     clerk_user_id = Column(String(255), nullable=False, index=True)
-    is_active = Column(Boolean, default=True, nullable=False)
     created = Column(TIMESTAMP, server_default=func.current_timestamp())
     updated = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
     company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"))
@@ -106,6 +105,7 @@ class AdCampaign(Base):
     company = relationship("Company", back_populates="ad_campaigns")
     ad_groups = relationship("AdGroup", back_populates="ad_campaign", cascade="all, delete-orphan")
     keywords = relationship("Keyword", secondary="ad_campaign_keyword", back_populates="ad_campaigns")
+    projects = relationship("Project", secondary="project_ad_campaign", back_populates="ad_campaigns")
 
 
 class AdGroup(Base):
@@ -114,13 +114,89 @@ class AdGroup(Base):
     id = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
     clerk_user_id = Column(String(255), nullable=False, index=True)
-    is_active = Column(Boolean, default=True, nullable=False)
     created = Column(TIMESTAMP, server_default=func.current_timestamp())
     updated = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
     ad_campaign_id = Column(Integer, ForeignKey("ad_campaigns.id", ondelete="CASCADE"))
     
     ad_campaign = relationship("AdCampaign", back_populates="ad_groups")
     keywords = relationship("Keyword", secondary="ad_group_keyword", back_populates="ad_groups")
+    projects = relationship("Project", secondary="project_ad_group", back_populates="ad_groups")
+
+
+class Project(Base):
+    __tablename__ = "projects"
+    __table_args__ = (
+        Index('idx_project_clerk_user_id', 'clerk_user_id'),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    title = Column(String(255), nullable=False)
+    clerk_user_id = Column(String(255), nullable=False)
+    created = Column(TIMESTAMP, server_default=func.current_timestamp())
+    updated = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
+    
+    # Relationships to entities (many-to-many)
+    companies = relationship("Company", secondary="project_company", back_populates="projects")
+    ad_campaigns = relationship("AdCampaign", secondary="project_ad_campaign", back_populates="projects")
+    ad_groups = relationship("AdGroup", secondary="project_ad_group", back_populates="projects")
+
+
+class Settings(Base):
+    __tablename__ = "settings"
+    __table_args__ = (
+        UniqueConstraint('clerk_user_id', 'key', name='unique_user_setting'),
+        Index('idx_settings_clerk_user_id', 'clerk_user_id'),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    clerk_user_id = Column(String(255), nullable=False)
+    key = Column(String(255), nullable=False)
+    value = Column(String(1000), nullable=True)  # JSON string for complex values
+    created = Column(TIMESTAMP, server_default=func.current_timestamp())
+    updated = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
+
+
+# Association tables for project-entity relationships
+class ProjectCompany(Base):
+    __tablename__ = "project_company"
+    __table_args__ = (
+        UniqueConstraint('project_id', 'company_id', name='unique_project_company'),
+        Index('idx_project_company_clerk_user_id', 'clerk_user_id'),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
+    clerk_user_id = Column(String(255), nullable=False)
+    created = Column(TIMESTAMP, server_default=func.current_timestamp())
+
+
+class ProjectAdCampaign(Base):
+    __tablename__ = "project_ad_campaign"
+    __table_args__ = (
+        UniqueConstraint('project_id', 'ad_campaign_id', name='unique_project_ad_campaign'),
+        Index('idx_project_ad_campaign_clerk_user_id', 'clerk_user_id'),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    ad_campaign_id = Column(Integer, ForeignKey("ad_campaigns.id", ondelete="CASCADE"), nullable=False)
+    clerk_user_id = Column(String(255), nullable=False)
+    created = Column(TIMESTAMP, server_default=func.current_timestamp())
+
+
+class ProjectAdGroup(Base):
+    __tablename__ = "project_ad_group"
+    __table_args__ = (
+        UniqueConstraint('project_id', 'ad_group_id', name='unique_project_ad_group'),
+        Index('idx_project_ad_group_clerk_user_id', 'clerk_user_id'),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    ad_group_id = Column(Integer, ForeignKey("ad_groups.id", ondelete="CASCADE"), nullable=False)
+    clerk_user_id = Column(String(255), nullable=False)
+    created = Column(TIMESTAMP, server_default=func.current_timestamp())
 
 
 class Keyword(Base):

@@ -158,18 +158,16 @@ def generate_keywords(count: int) -> List[str]:
     return list(set(keywords))  # Remove duplicates
 
 
-def create_companies(count: int, activate_limit: int = 3) -> List[int]:
+def create_companies(count: int) -> List[int]:
     """Create companies and return their IDs"""
     print_info(f"Creating {count} companies...")
     company_ids = []
 
     for i in range(count):
-        is_active = i < activate_limit  # Only first N are active
         response = requests.post(
             f"{API_BASE_URL}/companies",
             json={
-                "title": generate_company_name(),
-                "is_active": is_active
+                "title": generate_company_name()
             }
         )
 
@@ -181,12 +179,11 @@ def create_companies(count: int, activate_limit: int = 3) -> List[int]:
         else:
             print_error(f"Failed to create company: {response.text}")
 
-    print_success(
-        f"Created {len(company_ids)} companies ({activate_limit} active)")
+    print_success(f"Created {len(company_ids)} companies")
     return company_ids
 
 
-def create_campaigns(company_ids: List[int], per_company: int, activate_limit: int = 5) -> List[int]:
+def create_campaigns(company_ids: List[int], per_company: int) -> List[int]:
     """Create campaigns for companies and return their IDs"""
     print_info(f"Creating {per_company} campaigns per company...")
     campaign_ids = []
@@ -196,14 +193,11 @@ def create_campaigns(company_ids: List[int], per_company: int, activate_limit: i
     for company_id in company_ids:
         company_name = f"Company_{company_id}"
         for i in range(per_company):
-            # Only first N are active
-            is_active = len(campaign_ids) < activate_limit
             response = requests.post(
                 f"{API_BASE_URL}/ad_campaigns",
                 json={
                     "title": generate_campaign_name(company_name),
-                    "company_id": company_id,
-                    "is_active": is_active
+                    "company_id": company_id
                 }
             )
 
@@ -216,12 +210,11 @@ def create_campaigns(company_ids: List[int], per_company: int, activate_limit: i
             else:
                 print_error(f"Failed to create campaign: {response.text}")
 
-    print_success(
-        f"Created {len(campaign_ids)} campaigns ({activate_limit} active)")
+    print_success(f"Created {len(campaign_ids)} campaigns")
     return campaign_ids
 
 
-def create_adgroups(campaign_ids: List[int], per_campaign: int, activate_limit: int = 7) -> List[int]:
+def create_adgroups(campaign_ids: List[int], per_campaign: int) -> List[int]:
     """Create ad groups for campaigns and return their IDs"""
     print_info(f"Creating {per_campaign} ad groups per campaign...")
     adgroup_ids = []
@@ -231,14 +224,11 @@ def create_adgroups(campaign_ids: List[int], per_campaign: int, activate_limit: 
     for campaign_id in campaign_ids:
         campaign_name = f"Campaign_{campaign_id}"
         for i in range(per_campaign):
-            # Only first N are active
-            is_active = len(adgroup_ids) < activate_limit
             response = requests.post(
                 f"{API_BASE_URL}/ad_groups",
                 json={
                     "title": generate_adgroup_name(campaign_name),
-                    "ad_campaign_id": campaign_id,
-                    "is_active": is_active
+                    "ad_campaign_id": campaign_id
                 }
             )
 
@@ -251,8 +241,7 @@ def create_adgroups(campaign_ids: List[int], per_campaign: int, activate_limit: 
             else:
                 print_error(f"Failed to create ad group: {response.text}")
 
-    print_success(
-        f"Created {len(adgroup_ids)} ad groups ({activate_limit} active)")
+    print_success(f"Created {len(adgroup_ids)} ad groups")
     return adgroup_ids
 
 
@@ -605,16 +594,10 @@ def show_stats():
         adgroups = adgroups_response.json().get("objects", [])
         keywords = keywords_response.json().get("objects", [])
 
-        active_companies = sum(1 for c in companies if c.get("is_active"))
-        active_campaigns = sum(1 for c in campaigns if c.get("is_active"))
-        active_adgroups = sum(1 for a in adgroups if a.get("is_active"))
-
         print(f"{Colors.BOLD}Entities:{Colors.END}")
-        print(
-            f"  Companies: {len(companies)} total ({active_companies} active)")
-        print(
-            f"  Campaigns: {len(campaigns)} total ({active_campaigns} active)")
-        print(f"  Ad Groups: {len(adgroups)} total ({active_adgroups} active)")
+        print(f"  Companies: {len(companies)} total")
+        print(f"  Campaigns: {len(campaigns)} total")
+        print(f"  Ad Groups: {len(adgroups)} total")
         print(f"  Keywords: {len(keywords)} total")
 
         print(f"\n{Colors.BOLD}Ratios:{Colors.END}")
